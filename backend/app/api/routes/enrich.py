@@ -42,11 +42,14 @@ from app.db.repository import (
     FreshnessVerdict,
     ProductRepository,
     build_enrichment_from_payload,
+    normalize_mpn,
 )
 from app.pipeline.enrichment import (
     EnrichmentRequest,
     EnrichmentResult,
     EnrichmentService,
+    IdentityInvariantError,
+    require_enrichment_identity,
 )
 from app.sources.candidates import normalize_domain
 from app.sources.discovery import SourceProvider
@@ -116,7 +119,7 @@ def enrich(
     session: Session = Depends(get_session),
 ) -> EnrichmentResult:
     repo = ProductRepository()
-    mpn = (request.Mfg_Part_Num or "").strip()
+    mpn = request.Mfg_Part_Num
 
     # Step 10B: optional DB-first path. Only ever honors a FRESH hit.
     if retrieve_from_db and mpn:
@@ -124,14 +127,18 @@ def enrich(
             session, mpn, settings.product_cache_freshness_days
         )
         if verdict == FreshnessVerdict.FRESH and record is not None:
-            payload = json.loads(record.payload or "{}")
             # The stored ``payload`` is the full ``EnrichmentResult.model_dump``;
             # rebuild through pydantic so the response shape is identical to
-            # a fresh run. Missing/empty payloads raise and fall through to
-            # the pipeline as a defensive fallback.
+            # a fresh run. A row/payload mismatch is cache corruption: fail
+            # closed and run the requested product through the pipeline.
             try:
+                payload = json.loads(record.payload or "{}")
                 rebuilt = build_enrichment_from_payload(payload)
-            except Exception:
+                if record.part_number != mpn or normalize_mpn(record.part_number) != mpn:
+                    rebuilt = None
+                elif rebuilt is not None:
+                    require_enrichment_identity(rebuilt, mpn)
+            except (ValueError, TypeError, IdentityInvariantError):
                 rebuilt = None
             if rebuilt is not None:
                 # Attach a small meta block so the UI can show "Loaded from
@@ -161,7 +168,18 @@ def enrich(
                 )
 
     # Default path: run the real pipeline.
-    result = service.run(request)
+    try:
+        result = service.run(request)
+        require_enrichment_identity(result, mpn)
+    except IdentityInvariantError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "enrichment produced an inconsistent product identity; "
+                "the result was not returned or stored."
+            ),
+            headers={"X-Identity-Error": "true"},
+        ) from exc
 
     # Step 10B: persist the result. A failure here becomes a sanitized 500
     # so the operator knows the pipeline succeeded but the database write

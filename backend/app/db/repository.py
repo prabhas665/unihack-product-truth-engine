@@ -5,9 +5,8 @@ service so API routes never write raw SQL or reach into the ORM directly.
 
 Design choices that matter for callers:
 
-* **MPN normalization.** Lookups strip whitespace and compare
-  case-insensitively; the stored ``part_number`` preserves the original
-  casing seen by the operator so it stays reviewable.
+* **MPN normalization.** Lookups, persisted ``part_number`` values, and
+  response identities use one trimmed uppercase canonical representation.
 * **No silent merging.** Duplicate MPNs in the UniHack dataset are real and
   can belong to different manufacturer/description contexts. ``find_by_mpn``
   and ``find_fresh_records_by_mpn`` therefore return ALL matches ordered by
@@ -42,7 +41,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.domain.common import utcnow
 from app.db.models import ProductRecordModel
-from app.pipeline.enrichment import EnrichmentResult
+from app.pipeline.enrichment import (
+    EnrichmentResult,
+    canonicalize_mpn,
+    require_enrichment_identity,
+)
 
 
 class FreshnessVerdict(str, Enum):
@@ -60,8 +63,8 @@ SUCCESS_STATUSES: frozenset[str] = frozenset({"completed", "needs_review"})
 
 
 def normalize_mpn(value: str | None) -> str:
-    """Strip whitespace from an MPN for lookup; preserves the original case."""
-    return (value or "").strip()
+    """Return the canonical MPN used by lookup, storage, and API output."""
+    return canonicalize_mpn(value)
 
 
 def _mpn_match_clause(column, target: str):
@@ -391,6 +394,9 @@ class ProductRepository:
         Raises on a JSON encoding failure: callers are expected to translate
         that into a sanitized server error.
         """
+        # Persistence is a second defensive boundary. The API validates too,
+        # but repository callers must never be able to store a mixed identity.
+        require_enrichment_identity(result)
         rid = run_id or uuid.uuid4().hex
         record = ProductRecordModel(
             job_id=job_id,
@@ -402,7 +408,7 @@ class ProductRepository:
             brand=(
                 result.product.identity.brand if result.product is not None else ""
             ),
-            part_number=result.input_row.mfg_part_num_value or "",
+            part_number=normalize_mpn(result.input_row.mfg_part_num_value),
             description=result.input_row.part_desc_value or "",
             status=result.processing.status.value,
             quality_score=result.quality.overall,

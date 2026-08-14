@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 import httpx
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.domain import (
     AttributeValue,
@@ -154,6 +154,12 @@ class EnrichmentRequest(BaseModel):
     # are never affected and this field never enters the CSV row.
     source_url: str = ""
 
+    @field_validator("Mfg_Part_Num", mode="before")
+    @classmethod
+    def _canonicalize_mpn(cls, value: object) -> str:
+        """Use one display/key representation throughout a run and cache."""
+        return canonicalize_mpn(value if isinstance(value, str) else "")
+
     @model_validator(mode="after")
     def _require_some_input(self) -> "EnrichmentRequest":
         if all(not getattr(self, field).strip() for field in REQUEST_FIELDS):
@@ -202,6 +208,11 @@ REQUEST_FIELDS: list[str] = [
     "DIB_Brand",
     "Part_Manuf",
 ]
+
+
+def canonicalize_mpn(value: str | None) -> str:
+    """Canonical MPN for request, identity, delivery, persistence, and reuse."""
+    return (value or "").strip().upper()
 
 
 def _merge_domains(
@@ -306,6 +317,53 @@ class EnrichmentResult(BaseModel):
     delivery: DeliveryRowView = Field(default_factory=DeliveryRowView)
     review_reasons: list[str] = Field(default_factory=list)
     quality: QualityScore = Field(default_factory=QualityScore)
+
+
+class IdentityInvariantError(ValueError):
+    """Raised when one response contains more than one product identity."""
+
+
+def enrichment_identity_errors(
+    result: EnrichmentResult, expected_mpn: str | None = None
+) -> list[str]:
+    """Return every violation of the single-MPN response contract.
+
+    Values must already be canonical, not merely equivalent after trimming or
+    case folding. This prevents a legacy payload from being returned with a
+    display identity different from the request that selected it.
+    """
+    target = canonicalize_mpn(
+        expected_mpn if expected_mpn is not None else result.request.Mfg_Part_Num
+    )
+    actuals: dict[str, str | None] = {
+        "request.Mfg_Part_Num": result.request.Mfg_Part_Num,
+        "input_row.mfg_part_num_value": result.input_row.mfg_part_num_value,
+        "product.identity.mpn": (
+            result.product.identity.mpn if result.product is not None else None
+        ),
+    }
+    headers = result.delivery.headers
+    values = result.delivery.values
+    for header in ("Mfg_Part_Num", "PART_NUMBER"):
+        try:
+            actuals[f"delivery.{header}"] = values[headers.index(header)]
+        except (ValueError, IndexError):
+            actuals[f"delivery.{header}"] = None
+
+    return [
+        f"{field}={value!r} does not equal canonical MPN {target!r}"
+        for field, value in actuals.items()
+        if value != target
+    ]
+
+
+def require_enrichment_identity(
+    result: EnrichmentResult, expected_mpn: str | None = None
+) -> None:
+    """Fail closed rather than return or persist a cross-product result."""
+    errors = enrichment_identity_errors(result, expected_mpn)
+    if errors:
+        raise IdentityInvariantError("; ".join(errors))
 
 
 class EnrichmentService:
@@ -657,7 +715,7 @@ class EnrichmentService:
             StageName.DELIVERY,
         )
 
-        return EnrichmentResult(
+        final_result = EnrichmentResult(
             request=request,
             input_row=InputRowView.from_row(input_row),
             processing=product.processing,
@@ -672,6 +730,8 @@ class EnrichmentService:
             review_reasons=review_reasons,
             quality=product.quality,
         )
+        require_enrichment_identity(final_result)
+        return final_result
 
     # -- stage internals ----------------------------------------------------
 

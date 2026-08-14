@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { enrichOne, getDashboard, getHealth, runBatch, runEvaluation } from "./api/client";
 import type { HealthResponse } from "./api/client";
@@ -27,6 +27,21 @@ const DEMO_REQUEST: EnrichmentRequest = {
   Part_Manuf: "Makita Usa Inc (5142)",
   source_url: "https://makitatools.com/products/details/XLC10ZW",
 };
+
+const EMPTY_REQUEST: EnrichmentRequest = {
+  Mfg_Part_Num: "",
+  Part_Desc: "",
+  E1_Brand: "",
+  Unilog_Brand: "",
+  DIB_Brand: "",
+  Part_Manuf: "",
+  source_url: "",
+};
+
+/** Quick mode deliberately sends no inherited demo metadata or source URL. */
+export function quickMpnRequest(mpn: string): EnrichmentRequest {
+  return { ...EMPTY_REQUEST, Mfg_Part_Num: mpn };
+}
 
 const FIELD_LABELS: { key: keyof EnrichmentRequest; label: string }[] = [
   { key: "Mfg_Part_Num", label: "Mfg Part Num" },
@@ -280,23 +295,52 @@ export default function App() {
 }
 
 function SingleProductTab() {
-  const [request, setRequest] = useState<EnrichmentRequest>(DEMO_REQUEST);
+  const [quickMpn, setQuickMpn] = useState(DEMO_REQUEST.Mfg_Part_Num);
+  const [advancedRequest, setAdvancedRequest] =
+    useState<EnrichmentRequest>(EMPTY_REQUEST);
   const [result, setResult] = useState<EnrichmentResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [retrieveFromDb, setRetrieveFromDb] = useState(false);
   const [mode, setMode] = useState<"quick" | "advanced">("quick");
+  const runId = useRef(0);
+
+  function clearRunDisplay() {
+    // A result is only valid for the exact form state that submitted it.
+    setResult(null);
+    setRunError(null);
+  }
+
+  function updateQuickMpn(value: string) {
+    clearRunDisplay();
+    setQuickMpn(value);
+  }
+
+  function updateAdvanced<K extends keyof EnrichmentRequest>(
+    key: K,
+    value: EnrichmentRequest[K]
+  ) {
+    clearRunDisplay();
+    setAdvancedRequest((prev) => ({ ...prev, [key]: value }));
+  }
 
   async function onRun() {
+    const submittedRequest =
+      mode === "quick" ? quickMpnRequest(quickMpn) : advancedRequest;
+    const thisRun = ++runId.current;
     setLoading(true);
-    setRunError(null);
-    setResult(null);
+    clearRunDisplay();
     try {
-      setResult(await enrichOne(request, { retrieveFromDb }));
+      const nextResult = await enrichOne(submittedRequest, { retrieveFromDb });
+      // Ignore a response from an invalidated run. Inputs are disabled while
+      // loading, but this also protects against future UI changes/races.
+      if (runId.current === thisRun) setResult(nextResult);
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : String(err));
+      if (runId.current === thisRun) {
+        setRunError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (runId.current === thisRun) setLoading(false);
     }
   }
 
@@ -318,14 +362,22 @@ function SingleProductTab() {
         <button
           type="button"
           className={mode === "quick" ? "active" : ""}
-          onClick={() => setMode("quick")}
+          disabled={loading}
+          onClick={() => {
+            clearRunDisplay();
+            setMode("quick");
+          }}
         >
           Quick Demo (MPN)
         </button>
         <button
           type="button"
           className={mode === "advanced" ? "active" : ""}
-          onClick={() => setMode("advanced")}
+          disabled={loading}
+          onClick={() => {
+            clearRunDisplay();
+            setMode("advanced");
+          }}
         >
           Advanced / Official Input (6 fields)
         </button>
@@ -342,14 +394,10 @@ function SingleProductTab() {
           <label className="field">
             <span>Mfg Part Num</span>
             <input
-              value={request.Mfg_Part_Num}
+              value={quickMpn}
               placeholder="e.g. XLC10ZW"
-              onChange={(e) =>
-                setRequest((prev) => ({
-                  ...prev,
-                  Mfg_Part_Num: e.target.value,
-                }))
-              }
+              disabled={loading}
+              onChange={(e) => updateQuickMpn(e.target.value)}
             />
           </label>
         ) : (
@@ -358,24 +406,19 @@ function SingleProductTab() {
               <label className="field" key={key}>
                 <span>{label}</span>
                 <input
-                  value={request[key]}
-                  onChange={(e) =>
-                    setRequest((prev) => ({ ...prev, [key]: e.target.value }))
-                  }
+                  value={advancedRequest[key]}
+                  disabled={loading}
+                  onChange={(e) => updateAdvanced(key, e.target.value)}
                 />
               </label>
             ))}
             <label className="field field-wide">
               <span>Manufacturer Source URL (optional)</span>
               <input
-                value={request.source_url ?? ""}
+                value={advancedRequest.source_url ?? ""}
+                disabled={loading}
                 placeholder="https://makitatools.com/products/details/..."
-                onChange={(e) =>
-                  setRequest((prev) => ({
-                    ...prev,
-                    source_url: e.target.value,
-                  }))
-                }
+                onChange={(e) => updateAdvanced("source_url", e.target.value)}
               />
             </label>
             <p className="field-hint">
@@ -391,6 +434,7 @@ function SingleProductTab() {
             <input
               type="checkbox"
               checked={retrieveFromDb}
+              disabled={loading}
               onChange={(e) => setRetrieveFromDb(e.target.checked)}
             />
             Use stored result if fresh
@@ -398,7 +442,12 @@ function SingleProductTab() {
           <button
             type="button"
             className="secondary"
-            onClick={() => setRequest(DEMO_REQUEST)}
+            disabled={loading}
+            onClick={() => {
+              clearRunDisplay();
+              setAdvancedRequest(DEMO_REQUEST);
+              setMode("advanced");
+            }}
           >
             Load verified demo
           </button>
@@ -410,7 +459,7 @@ function SingleProductTab() {
 
       {runError && <div className="error-box">Run failed: {runError}</div>}
 
-      {result && isMpnOnlyInput(request) && result.processing.status === "needs_review" && (
+      {result && isMpnOnlyInput(result.request) && result.processing.status === "needs_review" && (
         <div className="info-box">
           No identity or evidence could be resolved from the MPN alone. Open
           “Advanced / Official Input” and add Part_Desc, Part_Manuf, or a

@@ -175,7 +175,7 @@ def default_request(**overrides):
 
 def _make_result(**overrides):
     """Build a minimal valid EnrichmentResult for persistence tests."""
-    from app.core.domain import ProductIdentity
+    from app.core.domain import ProductIdentity, ProductIntelligence
     from app.sources.discovery import DiscoveryResult
 
     req = default_request()
@@ -207,6 +207,8 @@ def _make_result(**overrides):
         processing=processing,
         stages=stages,
         discovery=discovery,
+        product=overrides.pop("product", None)
+        or ProductIntelligence(identity=discovery.product, processing=processing),
         delivery=overrides.pop("delivery", None) or _default_delivery(),
         quality=overrides.pop("quality", None) or _default_quality(),
         **overrides,
@@ -215,7 +217,12 @@ def _make_result(**overrides):
 
 def _default_delivery():
     from app.pipeline.enrichment import DeliveryRowView
-    return DeliveryRowView(values=[], notes=[], column_count=0)
+    return DeliveryRowView(
+        headers=["Mfg_Part_Num", "PART_NUMBER"],
+        values=["DCB518ASTS06G", "DCB518ASTS06G"],
+        notes=[],
+        column_count=2,
+    )
 
 
 def _default_quality():
