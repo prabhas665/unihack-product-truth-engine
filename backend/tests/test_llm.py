@@ -17,6 +17,7 @@ from app.llm import (
     ExtractedAttribute,
     ExtractedAttributes,
     FakeLLMClient,
+    LLMClient,
     LLMConfigurationError,
     LLMError,
     LLMInvalidResponseError,
@@ -166,8 +167,55 @@ class TestProviderRegistry:
         monkeypatch.setattr(settings, "llm_provider", "fake")
         assert get_client() is get_client()
 
-    def test_fake_provider_works_without_api_key(self):
+    def test_fake_provider_works_without_api_key(self, monkeypatch):
         """No LLM_API_KEY is set anywhere; fake must still function."""
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.setattr(settings, "llm_api_key", "")
         client = get_client(provider="fake")
-        assert settings.llm_api_key == ""
         assert client.provider == "fake"
+
+
+class _SlowFakeLLMClient(LLMClient):
+    """Offline client whose calls sleep past the wall-clock deadline."""
+
+    provider = "fake-slow"
+
+    def __init__(self, sleep_seconds: float = 5.0) -> None:
+        self._sleep = sleep_seconds
+
+    def _complete(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str = "",
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        import time
+
+        time.sleep(self._sleep)
+        return "{}"
+
+
+class TestWallClockTimeout:
+    def test_settings_timeout_raises_llm_timeout_error(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr(settings, "llm_timeout_seconds", 0.2)
+        client = _SlowFakeLLMClient(sleep_seconds=5.0)
+        start = time.perf_counter()
+        with pytest.raises(LLMTimeoutError):
+            client.complete(CompletionRequest(user_prompt="hi"))
+        assert time.perf_counter() - start < 2.0  # hard wall-clock, not full sleep
+
+    def test_per_request_timeout_overrides_settings(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr(settings, "llm_timeout_seconds", 30.0)
+        client = _SlowFakeLLMClient(sleep_seconds=5.0)
+        start = time.perf_counter()
+        with pytest.raises(LLMTimeoutError):
+            client.complete(
+                CompletionRequest(user_prompt="hi", timeout_seconds=0.2)
+            )
+        assert time.perf_counter() - start < 2.0

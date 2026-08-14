@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.core.domain import (
     AttributeValue,
+    Descriptions,
     ProductIdentity,
     ProductIntelligence,
     ProcessingError,
@@ -47,13 +48,20 @@ from app.core.domain import (
     ConfidenceSummary,
 )
 from app.core.domain.common import utcnow
+from app.descriptions import (
+    DescriptionsService,
+    apply_grounding,
+    apply_description_rules,
+    has_any_content,
+)
+from app.identity.mapping import VerifiedBrandLookup, resolve_verified_identity
 from app.extraction import (
     ExtractionError,
     ExtractionRequest,
     ExtractionResponse,
     ExtractionService,
 )
-from app.llm import LLMClient, LLMConfigurationError, get_client
+from app.llm import LLMClient, LLMConfigurationError, LLMError, get_client
 from app.sources.candidates import SourceCandidate
 from app.sources.discovery import (
     DiscoveryContext,
@@ -74,7 +82,6 @@ from app.sources.retrieval.pdf import PdfFetcher
 from app.unihack.mapper import UniHackDeliveryMapper
 from app.unihack.models import DeliveryRow, UniHackInputRow
 from app.unihack.parser import INPUT_COLUMNS, UniHackInputParser
-from app.unihack.paths import delivery_reference_path
 from app.unihack.schema import DeliverySchema
 from app.unihack.writer import DeliveryCsvWriter
 from app.validation.service import ValidationService, to_domain_attribute_value
@@ -92,6 +99,7 @@ class StageName(str, Enum):
     RETRIEVAL = "retrieval"
     EXTRACTION = "extraction"
     VALIDATION = "validation"
+    DESCRIPTION = "description"
     PRODUCT_INTELLIGENCE = "product_intelligence"
     DELIVERY = "delivery"
 
@@ -102,6 +110,7 @@ class StageStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    NEEDS_REVIEW = "needs_review"
 
 
 _STAGE_ORDER: list[StageName] = [
@@ -110,6 +119,7 @@ _STAGE_ORDER: list[StageName] = [
     StageName.RETRIEVAL,
     StageName.EXTRACTION,
     StageName.VALIDATION,
+    StageName.DESCRIPTION,
     StageName.PRODUCT_INTELLIGENCE,
     StageName.DELIVERY,
 ]
@@ -137,6 +147,12 @@ class EnrichmentRequest(BaseModel):
     Unilog_Brand: str = ""
     DIB_Brand: str = ""
     Part_Manuf: str = ""
+    # Optional operator-confirmed manufacturer-owned source URL (Step 8B).
+    # When set, it becomes a PENDING SourceCandidate that still passes
+    # through the SourcePolicy; its hostname is used only as this request's
+    # manufacturer-domain candidate. The six official input columns above
+    # are never affected and this field never enters the CSV row.
+    source_url: str = ""
 
     @model_validator(mode="after")
     def _require_some_input(self) -> "EnrichmentRequest":
@@ -165,6 +181,18 @@ class EnrichmentRequest(BaseModel):
     def to_identity(self) -> ProductIdentity:
         return self.to_input_row().to_identity()
 
+    @classmethod
+    def from_row(cls, row: UniHackInputRow) -> "EnrichmentRequest":
+        """Build a request from a parsed dataset row (batch processing)."""
+        return cls(
+            Mfg_Part_Num=row.mfg_part_num,
+            Part_Desc=row.part_desc,
+            E1_Brand=row.e1_brand,
+            Unilog_Brand=row.unilog_brand,
+            DIB_Brand=row.dib_brand,
+            Part_Manuf=row.part_manuf,
+        )
+
 
 REQUEST_FIELDS: list[str] = [
     "Mfg_Part_Num",
@@ -174,6 +202,28 @@ REQUEST_FIELDS: list[str] = [
     "DIB_Brand",
     "Part_Manuf",
 ]
+
+
+def _merge_domains(
+    registry_domains: list[str] | None,
+    request_domains: list[str] | None,
+) -> list[str]:
+    """Combine curated-registry and request-scoped (source_url) domains.
+
+    Both sets are trusted for the current product: registry domains come from
+    the verified manufacturer seed, request domains come from a user-supplied
+    source URL. Neither is a global allowlist - trust stays scoped per product.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in (list(registry_domains or []) + list(request_domains or [])):
+        norm = d.strip().lower()
+        if norm.startswith("www."):
+            norm = norm[4:]
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
 
 
 class InputRowView(BaseModel):
@@ -281,6 +331,7 @@ class EnrichmentService:
         validation_service: ValidationService | None = None,
         schema: DeliverySchema | None = None,
         mapper: UniHackDeliveryMapper | None = None,
+        verified_lookup: VerifiedBrandLookup | None = None,
     ) -> None:
         # None -> run_discovery picks the settings-configured providers.
         self._providers = providers
@@ -291,10 +342,9 @@ class EnrichmentService:
         self._limits = limits
         self._llm_client = llm_client
         self._validation_service = validation_service or ValidationService()
-        self._schema = schema or DeliverySchema.from_reference_csv(
-            delivery_reference_path()
-        )
+        self._schema = schema or DeliverySchema.frozen()
         self._mapper = mapper or UniHackDeliveryMapper(self._schema)
+        self._verified_lookup = verified_lookup or VerifiedBrandLookup.default()
 
     # -- public API --------------------------------------------------------
 
@@ -307,15 +357,9 @@ class EnrichmentService:
     ) -> EnrichmentResult:
         """Run the pipeline; returns a reviewable result, never raises.
 
-        ``output_path`` optionally writes the 252-column delivery row there
-        (the official reference file is always refused). ``on_stage`` is an
-        optional transition observer (stage, status).
+        ``output_path`` optionally writes the 252-column delivery row there.
+        ``on_stage`` is an optional transition observer (stage, status).
         """
-        if output_path is not None and Path(output_path).resolve() == delivery_reference_path().resolve():
-            raise ValueError(
-                "refusing to overwrite the official delivery reference file"
-            )
-
         states: dict[StageName, StageState] = {
             stage: StageState(stage=stage) for stage in _STAGE_ORDER
         }
@@ -342,14 +386,45 @@ class EnrichmentService:
         input_row = request.to_input_row()
         mark(StageName.INPUT, StageStatus.COMPLETED)
 
+        # -- verified identity (BEFORE discovery) -------------------------
+        # Resolve the OEM identity (MANUFACTURER_NAME/BRAND_NAME/TRADE_NAME)
+        # from trusted sources only; never from raw input placeholders.
+        # Resolved up-front so discovery can scope trusted manufacturer
+        # domains to the verified manufacturer (no global domain trust).
+        raw_identity = input_row.to_identity()
+        verified = resolve_verified_identity(
+            raw_identity.mpn,
+            raw_identity.brand,
+            input_row.dib_brand_value or "",
+            input_row.part_manuf_value or "",
+            self._verified_lookup,
+        )
+        discovery_product = raw_identity.model_copy(
+            update={
+                "verified_manufacturer": verified.manufacturer,
+                "verified_brand": verified.brand,
+                "verified_trade_name": verified.trade_name,
+                "identity_provenance": verified.provenance,
+                "manufacturer": verified.manufacturer or raw_identity.manufacturer,
+                "brand": verified.brand or raw_identity.brand,
+            }
+        )
+        registry_domains = self._verified_lookup.domains_for(
+            raw_identity.mpn,
+            raw_identity.brand,
+            input_row.dib_brand_value or "",
+            input_row.part_manuf_value or "",
+        )
+        merged_domains = _merge_domains(registry_domains, self._manufacturer_domains)
+
         # -- discovery ------------------------------------------------------
         mark(StageName.DISCOVERY, StageStatus.RUNNING)
         discovery = run_discovery(
-            product=input_row.to_identity(),
+            product=discovery_product,
             providers=self._providers,
             context=DiscoveryContext(
-                product=input_row.to_identity(),
-                manufacturer_domains=self._manufacturer_domains,
+                product=discovery_product,
+                manufacturer_domains=merged_domains,
             ),
         )
         for provider_error in discovery.provider_errors:
@@ -361,6 +436,24 @@ class EnrichmentService:
             review_reasons.append(
                 f"rejected candidate {rejected.url}: {rejected.rejection_reason}"
             )
+
+        # -- verified identity (post-discovery, idempotent) ---------------
+        discovery.product.verified_manufacturer = verified.manufacturer
+        discovery.product.verified_brand = verified.brand
+        discovery.product.verified_trade_name = verified.trade_name
+        discovery.product.identity_provenance = verified.provenance
+        if verified.provenance:
+            review_reasons.append(
+                f"verified identity ({verified.provenance}): "
+                f"manufacturer={verified.manufacturer or '-'}, "
+                f"brand={verified.brand or '-'}"
+            )
+        else:
+            review_reasons.append(
+                "verified identity: none found; MANUFACTURER_NAME/BRAND_NAME "
+                "left blank (no trusted source)"
+            )
+
         mark(
             StageName.DISCOVERY,
             StageStatus.COMPLETED,
@@ -369,6 +462,7 @@ class EnrichmentService:
 
         # -- retrieval + extraction + validation ----------------------------
         evidence: list[EvidenceRecord] = []
+        usable: list[EvidenceRecord] = []
         extraction: ExtractionResponse | None = None
         validation: ValidationSummary | None = None
 
@@ -451,9 +545,32 @@ class EnrichmentService:
                     "no extracted attributes",
                 )
 
+        # -- description generation -----------------------------------------
+        validated = validation.attributes if validation is not None else []
+        mark(StageName.DESCRIPTION, StageStatus.RUNNING)
+        descriptions, desc_note, desc_reasons, desc_hint = (
+            self._generate_descriptions(
+                discovery.product,
+                validated,
+                usable,
+            )
+        )
+        review_reasons.extend(desc_reasons)
+        if descriptions is not None:
+            if desc_hint is not None:
+                mark(StageName.DESCRIPTION, desc_hint, desc_note)
+            else:
+                mark(StageName.DESCRIPTION, StageStatus.COMPLETED, desc_note)
+        else:
+            mark(
+                StageName.DESCRIPTION,
+                StageStatus.SKIPPED if desc_note.startswith("skipped")
+                else StageStatus.FAILED,
+                desc_note,
+            )
+
         # -- product intelligence -------------------------------------------
         mark(StageName.PRODUCT_INTELLIGENCE, StageStatus.RUNNING)
-        validated = validation.attributes if validation is not None else []
         attributes: dict[str, AttributeValue] = {
             attribute.name: to_domain_attribute_value(attribute)
             for attribute in validated
@@ -466,6 +583,7 @@ class EnrichmentService:
                 for record in evidence
                 if record.retrieval_status == RetrievalStatus.SUCCESS
             },
+            descriptions=descriptions or Descriptions(),
             quality=self._build_quality(validated),
             processing=ProcessingMetadata(
                 status=ProcessingStatus.PENDING,
@@ -499,14 +617,20 @@ class EnrichmentService:
         # Processing status reflects the execution of the pipeline itself:
         # a FAILED stage means the run did not produce its usual output
         # (e.g. LLM down); SKIPPED stages mean the result is partial and
-        # deserves human review; otherwise the run completed. Informational
-        # review reasons (blank values faithfully mapped from placeholders)
-        # do NOT downgrade a completed run.
+        # deserves human review; a NEEDS_REVIEW stage (unsupported claims
+        # dropped by the grounding guard) also deserves review; otherwise
+        # the run completed. Informational review reasons (blank values
+        # faithfully mapped from placeholders) do NOT downgrade a completed
+        # run.
         failed = any(
             state.status == StageStatus.FAILED for state in states.values()
         )
         skipped = any(
             state.status == StageStatus.SKIPPED for state in states.values()
+        )
+        needs_review_stage = any(
+            state.status == StageStatus.NEEDS_REVIEW
+            for state in states.values()
         )
         # A failed fetch means the result was built from incomplete evidence;
         # that deserves a review, just like skipped stages.
@@ -518,7 +642,7 @@ class EnrichmentService:
             ProcessingStatus.FAILED
             if failed
             else ProcessingStatus.NEEDS_REVIEW
-            if (skipped or retrieval_failed)
+            if (skipped or needs_review_stage or retrieval_failed)
             else ProcessingStatus.COMPLETED
         )
 
@@ -647,6 +771,100 @@ class EnrichmentService:
             f"{len(response.rejected)} rejected"
         )
         return response, note, reasons
+
+    def _generate_descriptions(
+        self,
+        identity: ProductIdentity,
+        validated: list[ValidatedAttribute],
+        usable: list[EvidenceRecord],
+    ) -> tuple[Descriptions | None, str, list[str], StageStatus | None]:
+        """Generate description variants from the validated attributes.
+
+        Uses ONLY the extracted/validated facts; a missing LLM or a provider
+        failure becomes a FAILED stage with a review reason - never an
+        exception and never fabricated copy. Generated copy passes through
+        the deterministic grounding guard (app.descriptions.grounding): any
+        unsupported factual claim (certification, warranty, dimensions,
+        material, performance, compatibility, accessory) not backed by the
+        identity/attributes/quotes is dropped and its field blanked. The
+        returned StageStatus hint tells the caller how to mark the stage:
+        NEEDS_REVIEW when only part of the copy was dropped, FAILED when the
+        guard left nothing at all.
+        """
+        reasons: list[str] = []
+        if not validated:
+            note = "skipped: no extracted attributes to describe"
+            reasons.append(
+                "description skipped: no extracted attributes to describe"
+            )
+            return None, note, reasons, None
+
+        client = self._llm_client
+        if client is None:
+            try:
+                client = get_client()
+            except LLMConfigurationError as exc:
+                note = f"failed: LLM not configured ({exc})"
+                reasons.append(f"description generation failed: {exc}")
+                return None, note, reasons, None
+
+        service = DescriptionsService(client)
+        attributes: dict[str, AttributeValue] = {
+            attribute.name: to_domain_attribute_value(attribute)
+            for attribute in validated
+        }
+        quotes = service.evidence_quotes(
+            [record.text for record in usable if record.text.strip()]
+        )
+        try:
+            descriptions = service.generate(
+                identity=identity,
+                attributes=attributes,
+                quotes=quotes,
+            )
+        except LLMError as exc:
+            note = f"failed ({type(exc).__name__}): {exc}"
+            reasons.append(f"description generation failed: {exc}")
+            return None, note, reasons, None
+
+        descriptions, grounding_reasons, drops = apply_grounding(
+            descriptions,
+            identity=identity,
+            attributes=attributes,
+            quotes=quotes,
+        )
+        reasons.extend(grounding_reasons)
+
+        descriptions, rule_reasons = apply_description_rules(descriptions)
+        reasons.extend(rule_reasons)
+        filled = [
+            label
+            for label, value in (
+                ("title", descriptions.product_title),
+                ("short", descriptions.short_description),
+                ("mobile", descriptions.mobile_description),
+                ("invoice", descriptions.invoice_description),
+                ("long", descriptions.long_description),
+                ("retail", descriptions.retail_description),
+                ("marketing", descriptions.marketing_description),
+            )
+            if value
+        ]
+        note = (
+            f"generated {len(filled)} variant(s): {', '.join(filled)}"
+            if filled
+            else "generated (all variants empty)"
+        )
+        if drops:
+            note += f"; grounding blanked {drops} unsupported field(s)"
+            status_hint = (
+                StageStatus.FAILED
+                if not has_any_content(descriptions)
+                else StageStatus.NEEDS_REVIEW
+            )
+        else:
+            status_hint = None
+        return descriptions, note, reasons, status_hint
 
     def _build_quality(self, validated: list[ValidatedAttribute]) -> QualityScore:
         """Honest, derived quality metrics (never fabricated).

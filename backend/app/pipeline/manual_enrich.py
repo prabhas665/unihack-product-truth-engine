@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     output = (
         args.output
-        or str(repo_root() / "data" / "delivery" / f"{_safe_filename(request.Mfg_Part_Num)}.csv")
+        or str(settings.runtime_data_dir() / "delivery" / f"{_safe_filename(request.Mfg_Part_Num)}.csv")
     )
 
     providers = None

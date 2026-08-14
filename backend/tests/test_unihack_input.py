@@ -1,8 +1,9 @@
 """Tests for the UniHack input parser (Step 6A).
 
-Uses the ACTUAL official dataset (``Unihack_ Sample Dataset - Input.csv``) —
-this is the sanctioned exception to the "generic fixtures" convention, since
-Part 8 of the spec explicitly requires the real files here.
+Uses the dev/evaluation fixture copy of the official dataset
+(``backend/tests/fixtures/Unihack_ Sample Dataset - Input.csv``). Production
+code never reads this file; it is only here so the parser's real placeholder
+semantics, duplicate detection, and row-error handling remain covered offline.
 """
 
 import csv
@@ -18,20 +19,20 @@ from app.unihack import (
     UniHackInputParser,
     UniHackInputResult,
     UniHackRowError,
-    unihack_input_path,
 )
+from app.unihack.paths import input_fixture_path
 
 parser = UniHackInputParser()
 
 
 def test_loads_exactly_1000_rows():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     assert isinstance(result, UniHackInputResult)
     assert result.total_rows == 1000
 
 
 def test_every_row_has_exactly_6_raw_fields():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     for row in result.rows:
         raw = [
             row.mfg_part_num,
@@ -47,8 +48,8 @@ def test_every_row_has_exactly_6_raw_fields():
 
 def test_raw_values_match_direct_csv_read(tmp_path):
     """Parser output must be byte-identical to a direct csv.reader read."""
-    result = parser.parse_path(unihack_input_path())
-    with unihack_input_path().open("r", encoding="utf-8-sig", newline="") as fh:
+    result = parser.parse_path(input_fixture_path())
+    with input_fixture_path().open("r", encoding="utf-8-sig", newline="") as fh:
         direct = list(csv.reader(fh))[1:]
     assert len(direct) == result.total_rows
     for row, cells in zip(result.rows, direct):
@@ -64,7 +65,7 @@ def test_raw_values_match_direct_csv_read(tmp_path):
 
 
 def test_placeholder_counts_on_real_file():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     assert result.placeholder_counts == {
         PLACEHOLDER_E1_BRAND: 799,
         PLACEHOLDER_UNILOG_BRAND: 1000,
@@ -74,7 +75,7 @@ def test_placeholder_counts_on_real_file():
 
 
 def test_placeholder_rows_keep_raw_but_semantic_none():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     placeholder_rows = [
         row
         for row in result.rows
@@ -89,19 +90,19 @@ def test_placeholder_rows_keep_raw_but_semantic_none():
 
 
 def test_part_manuf_placeholder_semantic_none():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     dash_rows = [row for row in result.rows if row.part_manuf == "-"]
     assert len(dash_rows) == 41
     assert all(row.part_manuf_value is None for row in dash_rows)
 
 
 def test_no_row_errors_on_real_file():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     assert result.row_errors == []
 
 
 def test_avm6ev_duplicate_group_detected_and_kept():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     assert result.duplicate_groups == {"AVM6EV": [783, 784]}
     dupe_rows = [row for row in result.rows if row.mfg_part_num_duplicate]
     assert len(dupe_rows) == 2
@@ -113,7 +114,7 @@ def test_avm6ev_duplicate_group_detected_and_kept():
 
 
 def test_to_identity_adapter():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     identity = result.rows[0].to_identity()
     assert identity.mpn == result.rows[0].mfg_part_num_value
     assert identity.raw_description == result.rows[0].part_desc_value
@@ -121,7 +122,7 @@ def test_to_identity_adapter():
 
 
 def test_placeholder_brand_leaves_identity_brand_empty():
-    result = parser.parse_path(unihack_input_path())
+    result = parser.parse_path(input_fixture_path())
     row = next(r for r in result.rows if r.e1_brand_value is None)
     assert row.to_identity().brand == ""
 

@@ -9,6 +9,15 @@ touches, keyed by the exact official header names.
 from collections import OrderedDict
 from pathlib import Path
 
+from app.unihack.delivery_headers import (
+    ARTIFACT_VERSION,
+    COLUMN_COUNT as FROZEN_COLUMN_COUNT,
+    DELIVERY_HEADERS,
+    GENERATED_AT,
+    SOURCE_FILENAME,
+    SOURCE_SHA256,
+)
+
 EXPECTED_COLUMN_COUNT: int = 252
 ATTRIBUTE_SLOT_COUNT: int = 50
 
@@ -124,8 +133,22 @@ class DeliverySchema:
         }
 
     @classmethod
+    def frozen(cls) -> "DeliverySchema":
+        """Load the schema from the committed, versioned frozen artifact.
+
+        This is the ONLY schema source used by production code. It performs no
+        file I/O and has no dependency on the official reference CSV at runtime.
+        """
+        return cls(list(DELIVERY_HEADERS))
+
+    @classmethod
     def from_reference_csv(cls, path: str | Path) -> "DeliverySchema":
-        """Load and validate the schema from the official reference file."""
+        """Load and validate the schema from a delivery-format CSV header.
+
+        Retained for development/evaluation tooling (it reads the dev fixture
+        copy, never a production artifact). Production routing must use
+        :meth:`frozen` instead.
+        """
         import csv
 
         file_path = Path(path)

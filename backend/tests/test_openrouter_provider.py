@@ -166,6 +166,20 @@ class TestFailureMapping:
         with pytest.raises(LLMTimeoutError):
             mock_client(handler).complete(CompletionRequest(user_prompt="hi"))
 
+    def test_wall_clock_timeout_raises_llm_timeout(self):
+        import time
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            time.sleep(5)  # provider never returns within the deadline
+            return json_completion("late")
+
+        start = time.perf_counter()
+        with pytest.raises(LLMTimeoutError):
+            mock_client(handler).complete(
+                CompletionRequest(user_prompt="hi", timeout_seconds=0.2)
+            )
+        assert time.perf_counter() - start < 2.0
+
     def test_connection_error_maps_to_unavailable(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused")

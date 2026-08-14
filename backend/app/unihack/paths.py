@@ -1,8 +1,14 @@
-"""Repo-root path helpers for the official UniHack CSV files (Step 6A).
+"""Repo-root path helpers for the UniHack integration layer.
 
-The two official files live at the repository root and must not be moved:
-path resolution walks up from this module to the repo root so the code keeps
-working regardless of where the repository is checked out.
+Production routing no longer depends on the official UniHack CSV files (Step
+6A). The 252-column delivery header is frozen into a committed artifact
+(``app/unihack/delivery_headers.py``) and loaded via ``DeliverySchema.frozen``;
+the batch/dashboard/lookup routes no longer read any CSV at runtime.
+
+The two official files remain available only as DEVELOPMENT/EVALUATION
+fixtures (``backend/tests/fixtures/``) so the evaluation harness and byte-exact
+regression tests can still run offline. Runtime production code must never
+import or read these fixtures.
 """
 
 from pathlib import Path
@@ -11,15 +17,25 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def repo_root() -> Path:
-    """Absolute path of the repository root (contains the UniHack CSVs)."""
+    """Absolute path of the repository root (contains ``backend/``)."""
     return _REPO_ROOT
 
 
-def unihack_input_path() -> Path:
-    """Path of the official input dataset (1000 rows x 6 columns)."""
-    return repo_root() / "Unihack_ Sample Dataset - Input.csv"
+def input_fixture_path() -> Path:
+    """Dev/evaluation-only copy of the official input CSV (NOT production)."""
+    return (
+        Path(__file__).resolve().parents[2]
+        / "tests"
+        / "fixtures"
+        / "Unihack_ Sample Dataset - Input.csv"
+    )
 
 
-def delivery_reference_path() -> Path:
-    """Path of the official 252-column delivery-format reference file."""
-    return repo_root() / "Unihack_ Expected Output - Delivery Format.csv"
+def delivery_fixture_path() -> Path:
+    """Dev/evaluation-only copy of the official 252-column reference CSV."""
+    return (
+        Path(__file__).resolve().parents[2]
+        / "tests"
+        / "fixtures"
+        / "Unihack_ Expected Output - Delivery Format.csv"
+    )

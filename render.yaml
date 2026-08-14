@@ -1,0 +1,58 @@
+# Render deployment manifest - UniHack Product Truth Engine
+# Single web service: FastAPI serves the API AND the prebuilt frontend
+# (frontend/dist) from the same origin, so the browser only ever talks to one
+# host and no CORS/frontend-config changes are required.
+#
+# Build: only the Python backend is installed at deploy time; the frontend
+# build is committed (frontend/dist is un-ignored in .gitignore) so no Node
+# toolchain is needed on Render. Rebuild after frontend changes:
+#   npm --prefix frontend run build
+#
+# Secrets (LLM_API_KEY, GROQ_API_KEY) are NOT committed. Create them in the
+# Render dashboard (leave the values blank here); they are injected as env
+# vars at runtime and are never sent to the browser.
+
+services:
+  - type: web
+    name: product-truth-engine
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: DATABASE_URL
+        value: sqlite:////data/unihack.db
+      - key: DATA_DIR
+        value: /data
+      - key: FRONTEND_DIST_DIR
+        value: ../frontend/dist
+      # Frontend uses no credentials, so "*" is safe here. For a stricter
+      # setup, replace with the exact Render static origin, e.g.
+      # https://product-truth-engine.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: "*"
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: DISCOVERY_PROVIDER
+        value: groq
+      - key: GROQ_MODEL
+        value: groq/compound-mini
+      - key: GROQ_API_KEY
+        sync: false
+    # Persistent disk keeps SQLite + batch/delivery CSVs across restarts.
+    # If your plan does not support disks, remove this block; the DB will be
+    # recreated on each deploy (re-enrichable) and batch downloads 404 after
+    # a restart.
+    disk:
+      name: pte-data
+      mountPath: /data
+      sizeGB: 1

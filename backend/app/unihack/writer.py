@@ -17,6 +17,33 @@ class DeliveryWriteError(ValueError):
     """A delivery row could not be written (wrong width, bad value)."""
 
 
+def escape_formula(value: str) -> str:
+    """Guard against spreadsheet formula injection (Step 9B).
+
+    Values Excel would evaluate as formulas get a leading apostrophe so they
+    are treated as text. The policy is deliberately conservative: ``=``,
+    ``+`` and ``@`` prefixes are always escaped (no legitimate product value
+    starts with them); ``-`` is escaped only when it begins something that
+    could parse as an expression (e.g. ``-SUM(A1)``), so negative numbers
+    (``-5``, ``-5.5 kg``), the bare ``-`` placeholder used by the official
+    dataset, the official ``-- ... --`` placeholder tokens, and hyphenated
+    values like ``XLC10ZW-2`` all pass through verbatim.
+    """
+    if not value:
+        return value
+    first = value[0]
+    if first in "=+@":
+        return "'" + value
+    if (
+        first == "-"
+        and len(value) > 1
+        and value[1] != "-"
+        and not (value[1].isdigit() or value[1] == ".")
+    ):
+        return "'" + value
+    return value
+
+
 class DeliveryCsvWriter:
     """Streaming writer for delivery rows; returns the number of rows."""
 
@@ -39,7 +66,7 @@ class DeliveryCsvWriter:
                         f"row has {len(row.values)} columns; expected "
                         f"{self.schema.count}"
                     )
-                writer.writerow(row.values)
+                writer.writerow([escape_formula(value) for value in row.values])
         return len(rows)
 
     def write_text(self, rows: list[DeliveryRow]) -> str:
@@ -57,5 +84,5 @@ class DeliveryCsvWriter:
                     f"row has {len(row.values)} columns; expected "
                     f"{self.schema.count}"
                 )
-            writer.writerow(row.values)
+            writer.writerow([escape_formula(value) for value in row.values])
         return buffer.getvalue()

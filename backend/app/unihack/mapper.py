@@ -201,8 +201,9 @@ class UniHackDeliveryMapper:
         fillable = {
             "PART_NUMBER": product.identity.mpn,
             "SKU - MY_PART_NUMBER": product.identity.sku or "",
-            "MANUFACTURER_NAME": product.identity.manufacturer,
-            "BRAND_NAME": product.identity.brand,
+            "MANUFACTURER_NAME": product.identity.verified_manufacturer,
+            "BRAND_NAME": product.identity.verified_brand,
+            "TRADE_NAME": product.identity.verified_trade_name,
         }
         for name, value in fillable.items():
             if value:

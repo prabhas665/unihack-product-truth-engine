@@ -13,7 +13,7 @@ from pypdf import PdfReader
 
 from app.core.domain import SourceType
 from app.sources.candidates import SourceCandidate
-from app.sources.retrieval.limits import RetrievalLimits
+from app.sources.retrieval.limits import RetrievalLimits, truncate_text
 from app.sources.retrieval.models import (
     EvidenceRecord,
     ExtractionStatus,
@@ -65,6 +65,7 @@ class PdfFetcher:
             reader = PdfReader(io.BytesIO(body))
             pages = [page.extract_text() or "" for page in reader.pages]
             text = "\n\n".join(page for page in pages if page.strip())
+            text = truncate_text(text, limits.max_text_chars)
         except Exception as exc:
             raise RetrievalError(
                 RetrievalErrorKind.PDF_EXTRACTION,

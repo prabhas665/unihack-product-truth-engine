@@ -328,3 +328,99 @@ class TestDomainMapping:
             assert value.conflict_status == ConflictStatus.AGREEMENT
         assert domain_values["voltage"].raw_value == "24"
         assert isinstance(response, ExtractionResponse)
+
+
+class TestEvidenceQuotes:
+    """Step 8B: exact quotes resolved from the retrieved evidence text."""
+
+    def test_quote_contains_the_exact_supporting_text(self):
+        record = make_evidence(
+            "ev-1", "The M1 operates at 24 V DC with IP65 protection."
+        )
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote != ""
+        assert "24 V DC" in attribute.quote
+        assert attribute.quote.startswith("The M1 operates at")
+
+    def test_quote_prefers_normalized_value(self):
+        record = make_evidence(
+            "ev-1",
+            "Length is 100 mm (approximately ten centimeters).",
+        )
+        service = service_with(
+            '{"items": [{"name": "length", "raw_value": "10 cm", '
+            '"normalized_value": "100 mm", "unit": "mm", "confidence": 0.9, '
+            '"evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert "100 mm" in attribute.quote
+        assert "10 cm" not in attribute.quote
+
+    def test_quote_tolerates_whitespace_differences(self):
+        record = make_evidence(
+            "ev-1", "Voltage rating:\n  24 V\n  DC input."
+        )
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert "24 V DC" in attribute.quote
+
+    def test_quote_unavailable_when_value_is_not_in_the_text(self):
+        record = make_evidence("ev-1", "The M1 has IP65 protection.")
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote == ""
+
+    def test_quote_unavailable_for_empty_evidence_text(self):
+        record = make_evidence("ev-1", "")
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote == ""
+
+    def test_quote_uses_the_earliest_occurrence(self):
+        record = make_evidence(
+            "ev-1", "24 V supply. Compatibility: 24 V systems only."
+        )
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote.count("24 V") >= 1
+        assert not attribute.quote.startswith("Compatibility")
+
+    def test_quote_is_length_capped(self):
+        record = make_evidence(
+            "ev-1",
+            "x" * 300 + " 24 V DC " + "y" * 300,
+        )
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote != ""
+        assert len(attribute.quote) <= 210
+
+    def test_notes_are_preserved_alongside_the_quote(self):
+        record = make_evidence("ev-1", "The M1 operates at 24 V DC.")
+        service = service_with(
+            '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
+            '"confidence": 0.9, "evidence_ids": ["ev-1"], '
+            '"notes": "per the technical datasheet"}]}'
+        )
+        attribute = service.extract(make_request(record)).attributes[0]
+        assert attribute.quote != ""
+        assert attribute.notes == "per the technical datasheet"

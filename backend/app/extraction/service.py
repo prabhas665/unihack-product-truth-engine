@@ -21,6 +21,7 @@ from app.core.domain import (
     ConflictStatus,
 )
 from app.extraction.prompt import SYSTEM_PROMPT, build_extraction_prompt
+from app.extraction.quotes import resolve_quote
 from app.extraction.types import (
     CandidateAttribute,
     ExtractionError,
@@ -126,9 +127,11 @@ class ExtractionService:
 
         attributes: list[CandidateAttribute] = []
         rejected: list[RejectedAttribute] = []
+        records_by_id = {record.evidence_id: record for record in request.evidence_records}
         for item in output.items:
             candidate, reason = self._validate_item(item, known_ids)
             if candidate is not None:
+                candidate = self._attach_quote(candidate, records_by_id)
                 attributes.append(candidate)
             else:
                 rejected.append(
@@ -164,6 +167,26 @@ class ExtractionService:
             return None
         known_ids = {record.evidence_id for record in request.evidence_records}
         return _parse_bullet_output(raw, known_ids)
+
+    @staticmethod
+    def _attach_quote(
+        candidate: CandidateAttribute,
+        records_by_id: dict[str, "EvidenceRecord"],
+    ) -> CandidateAttribute:
+        """Resolve the exact supporting quote from the first evidence record.
+
+        Uses the evidence text already attached to the retrieved record;
+        quotes are derived verbatim or left empty - never invented.
+        """
+        record = records_by_id.get(candidate.evidence_ids[0])
+        if record is None:
+            return candidate
+        quote = resolve_quote(
+            record.text, candidate.normalized_value, candidate.raw_value
+        )
+        if not quote:
+            return candidate
+        return candidate.model_copy(update={"quote": quote})
 
     @staticmethod
     def _validate_item(

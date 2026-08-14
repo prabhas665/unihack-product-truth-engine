@@ -19,11 +19,13 @@ frontend/ (React + Vite + TypeScript SPA)
    v
 backend/  (FastAPI, Python 3.11)
    app/
-     api/         REST routes: health, lookup, batch, dashboard, downloads
+     api/         REST routes: health, enrich, lookup, dashboard, batch,
+                  downloads
      pipeline/    orchestration: discovery -> extraction -> normalization
                   -> validation -> description (stage registry)
+     descriptions/ evidence-bound LLM description generation (Step 9)
      sources/     source discovery (candidates, policy, deterministic ranking)
-                 + evidence retrieval (HTML/PDF fetchers, limits, security gates)
+                  + evidence retrieval (HTML/PDF fetchers, limits, security gates)
      llm/         provider-agnostic LLM client (LLMClient + typed ops + registry)
      validation/  LOV validation, UOM normalization, quality gates
      db/          SQLAlchemy models + SQLite persistence (jobs, product records)
@@ -645,14 +647,120 @@ in `.env` and are never printed.
 
 ### Tests
 
-`backend/tests/test_enrichment.py` (21 tests, fully offline): full happy path,
+`backend/tests/test_enrichment.py` (22 tests, fully offline): full happy path,
 stage transitions in order, validation staying NOT_VALIDATED (never false
 VERIFIED), honest quality metrics, verbatim input preservation, CSV output
 with the official BOM + header and reference-file refusal, empty discovery,
 all-rejected, provider error, full/partial retrieval failure, LLM provider
 failure, malformed LLM output, missing LLM config, dangling evidence
-references, no-LLM-without-evidence, no fabricated values, and the API
-endpoint (200 + 422). Fakes only; zero network calls.
+references, no-LLM-without-evidence, description failure handling, no
+fabricated values, and the API endpoint (200 + 422). Fakes only; zero
+network calls.
+
+## Description generation (Step 9, `backend/app/descriptions/`)
+
+Fills the description variant fields (product title, short/mobile/invoice/
+long/retail/marketing descriptions, item features, With/Application/Includes,
+Product Name) from KNOWN facts only, right after validation in the same
+pipeline:
+
+- `types.py` - `GeneratedDescriptions`, the single structured LLM output
+  schema (one call returns all variants; the JSON key `with` maps to the
+  domain field `with_`).
+- `service.py` - `DescriptionsService.generate(identity, attributes,
+  quotes)`: deterministic prompt builder listing ONLY the extracted
+  attributes (value + unit + confidence) plus up to three truncated verbatim
+  evidence quotes, a system prompt that forbids inventing facts, and mapping
+  onto the domain `Descriptions` model.
+- Pipeline integration: a `description` stage between validation and
+  product-intelligence. Missing LLM config or provider failures become a
+  FAILED stage with review reasons - variants stay empty, never fabricated.
+  No attributes (extraction skipped/rejected) -> stage SKIPPED, no LLM call.
+  Successful variants land in the official delivery columns (MOBILE_DESC,
+  INVOICE_DESC, SHORT_DESC, LONG_DESC1, RETAIL_DESC, MARKETING_DESCRIPTION,
+  ITEM_FEATURES_1..20, With, Application, Includes, Product Name) via the
+  existing delivery mapper.
+
+Tests: `backend/tests/test_descriptions.py` (11 tests, fake LLM only) - prompt
+construction, schema mapping (including the `with` alias), empty-variant
+honesty, malformed/provider failures, quote truncation.
+
+## Dataset services and batch enrichment (Step 9, `backend/app/api/routes/`)
+
+Three new REST endpoints on top of the real UniHack input dataset, plus a
+download endpoint:
+
+- `GET /api/lookup?mpn=XLC10ZW` - exact, case-insensitive MPN lookup in the
+  real 1000-row dataset (duplicate groups return every matching row); the
+  response shape matches the `/api/enrich` `input_row` view.
+- `GET /api/dashboard` - real dataset statistics (rows, unique MPNs,
+  duplicate groups, row errors, per-field missing/placeholder counts) parsed
+  fresh through `UniHackInputParser`, plus the last persisted batch run
+  (job id, status, record count, per-status counts) from SQLite.
+- `POST /api/batch` - enriches a slice of the dataset (`mpns` list or
+  `start`/`limit`) with the real pipeline, writes one combined 252-column
+  delivery CSV to `data/batch/` (official header, UTF-8 BOM), persists the
+  run as a `Job` with one `ProductRecordModel` per row (full
+  `EnrichmentResult` JSON payload), and returns a per-row reviewable summary
+  plus the download URL.
+- `GET /api/downloads/{name}` - serves only files inside the managed
+  `data/batch/` directory; path traversal, absolute paths and symlink
+  escapes are refused with 404.
+
+### Batch guardrails and security hardening (Step 9B)
+
+- **Hard limits, no silent truncation** (`BATCH_MAX_ROWS`, default 50):
+  `limit` and the MPN list are validated against the cap; unbounded requests
+  (`limit` missing/0) and requests above the cap are rejected with HTTP 422.
+  `start` past the end still yields a safe empty selection.
+- **Row-level failure isolation**: one failing row never aborts the run. The
+  failed row gets a sanitized review reason (exception class name only -
+  never args, stack traces or secrets), a blank 252-cell CSV row (no
+  fabrication, keeps 1:1 dataset alignment), a `failed` `ProductRecordModel`,
+  and the remaining rows keep processing. Job status is exact: all
+  completed / all failed / mixed or any needs_review -> needs_review.
+- **Collision-free filenames + CSV-before-commit cleanup**: every batch file
+  gets a UUID suffix; if the DB commit fails, the exact file created for that
+  run is removed before the 500 propagates - no orphan CSVs.
+- **Payload growth cap** (`BATCH_PAYLOAD_EVIDENCE_CAP_CHARS`, default 20 000):
+  evidence text stored in the persisted payload is truncated per record;
+  evidence IDs, URLs and every extracted attribute quote stay intact.
+- **Spreadsheet formula injection**: the delivery CSV writer escapes values
+  starting with `=`, `+` or `@` and expression-like `-` prefixes, while
+  negative numbers, the official `-`/`-- ... --` placeholders and hyphenated
+  part numbers pass through verbatim. The frontend's client-side `toCsv`
+  applies the identical policy.
+
+### Description grounding guard (Step 9B, `backend/app/descriptions/grounding.py`)
+
+A deterministic second line of defense after the LLM prompt: generated copy
+is checked against the product's grounded vocabulary (identity fields,
+validated attributes, evidence quotes). Claims triggered by category words
+(certification, warranty, dimensions/weight, material, performance,
+compatibility, accessories) are kept only when their terms are grounded;
+natural derivations ("Cordless vacuum", "18 V cordless vacuum") pass. Any
+unsupported claim blanks the affected field (or drops the affected
+`item_features` entry) and adds a review reason - nothing is silently
+accepted. Partial drops mark the description stage NEEDS_REVIEW; if the
+guard leaves nothing, the stage is FAILED. `with`/`includes` fields are
+whole-field grounded (they are accessory claims by definition).
+
+Tests: `backend/tests/test_api_extras.py`, `backend/tests/test_batch_safety.py`
+(limits, isolation, filenames, commit cleanup, payload cap, secret
+non-leakage, download path/symlink hardening), `backend/tests/test_grounding.py`
+(guard unit + pipeline integration incl. stage statuses), plus writer
+formula-escape tests in `backend/tests/test_unihack_delivery.py`. Fakes only;
+zero network calls.
+
+The frontend adds three tabs: **Single product** (existing form + MPN lookup
+button + full reviewable result incl. a Descriptions section), **Dataset**
+(dashboard stats + last batch run) and **Batch** (run by MPNs or row count,
+per-row summary + combined CSV download).
+
+Tests: `backend/tests/test_api_extras.py` (13 tests) - lookup exact/case/
+duplicates/empty/422, dashboard stats against the real file, batch by MPNs
+and by start/limit with tmp_path output + in-memory SQLite persistence,
+empty-selection safety, downloads (serve CSV, traversal + missing-file 404).
 
 ## Current limitations (deliberate)
 
@@ -673,35 +781,82 @@ endpoint (200 + 422). Fakes only; zero network calls.
 - Evidence retrieval foundation is in place (HTML + PDF fetchers), and evidence
   extraction (`backend/app/extraction/`) is built on top of it; the Step 6D
   pipeline wires candidates → retrieval → AI extraction → normalization/
-  validation → delivery. Description generation is not wired yet; retrieval
-  only ever runs on approved candidates.
+  validation → delivery, and Step 9 adds description generation (evidence-bound
+  copywriting wired into the pipeline and the delivery columns).
+- Product lookup (`/api/lookup`), dataset dashboard (`/api/dashboard`), batch
+  enrichment (`/api/batch`) and delivery downloads (`/api/downloads`) exist
+  (Step 9); batch is synchronous, bounded by `BATCH_MAX_ROWS` (default 50),
+  and the frontend runs it request/response like single enrichment. The
+  description grounding guard (Step 9B) is a conservative trigger-word
+  heuristic, not proof of truthfulness: it only catches unsupported claims
+  phrased with category trigger words.
 - The normalization/validation framework (`backend/app/validation/`) is in place
   but only generic normalization is active; official LOV/UOM/manufacturer-brand
   providers are UNAVAILABLE by design until the official resources arrive.
-- No product lookup, batch upload, dashboard, or download endpoints exist yet.
+- Product lookup, dashboard, batch enrichment, and download endpoints are
+  implemented (Step 9: `GET /api/lookup`, `GET /api/dashboard`,
+  `POST /api/batch`, `GET /api/downloads/{name}`) and the frontend exposes
+  dataset/batch tabs.
 - Step 6A wires the real input CSV → internal model → 252-column delivery
   format, but no AI/discovery/enrichment runs: descriptions, brands,
   manufacturer names, taxonomy, codes, dimensions, assets, and all other
   unverified fields map as BLANK cells with per-column notes - nothing is
   invented, and the delivery example rows are NOT treated as ground truth.
 
+### Step 10B — Persistent Product Intelligence
+
+Enriched products are now persisted in a `product_records` table (SQLite) and
+reused without re-running the pipeline.
+
+**ProductRepository** (`backend/app/db/repository.py`): wraps all DB access
+behind a typed service. Key operations:
+- `save_enrichment()` — persists a successful `EnrichmentResult` with
+  structured fields (sources, evidence, attributes, descriptions, validation,
+  enrichment history) and the legacy opaque `payload` JSON.
+- `find_by_mpn()` — returns all stored records for an MPN (no silent merging).
+- `find_fresh_records_by_mpn()` — returns only records within the freshness
+  window (`PRODUCT_CACHE_FRESHNESS_DAYS`, default 30).
+- `find_fresh_by_mpn()` — returns the most recent successful record with a
+  freshness verdict: `FRESH`, `STALE`, or `NOT_FOUND`.
+
+**DB-first lookup** (`GET /api/lookup`):
+1. FRESH stored record → `source="database"`, `stale=false`, no LLM/retrieval.
+2. STALE stored record → `source="database"`, `stale=true`, plus dataset rows.
+3. No record → falls back to the official CSV dataset. Never auto-runs the
+   pipeline.
+
+**`retrieve_from_db` on enrich** (`POST /api/enrich?retrieve_from_db=true`):
+optional query parameter (default `false`). When `true` and a FRESH stored
+record exists for the request's MPN, the stored `EnrichmentResult` is rebuilt
+and returned with `X-Source: database` header and `__source__` body key — no
+pipeline runs. When `false` or no fresh record exists, the pipeline runs as
+before and the result is persisted.
+
+**Migration** (`backend/app/db/migration.py`): idempotent SQLite `ALTER TABLE`
+adds 9 new columns to `product_records` on startup. Works for both fresh DBs
+(`create_all` already includes them) and legacy Step-9 DBs (migration adds
+them with safe defaults). No Alembic.
+
+**Limitations:**
+- Batch processing (`/api/batch`) still writes records directly without
+  going through the repository — this will be unified in a future step.
+- Dashboard does not yet expose persisted-product stats (the repository
+  has `dashboard_stats()` ready).
+- The DB-hit response carries metadata via `__source__`/`__stale__` body
+  keys plus `X-Source`/`X-Stale` headers (the `response_model` is bypassed
+  for the DB path).
+- `retrieve_from_db=true` only honors FRESH records — stale records remain
+  available for explicit pipeline enrichment.
+- No secrets, API keys, or Authorization headers are ever serialized into
+  stored JSON columns.
+
 ## What's next (in priority order)
 
-1. Define the domain model against the real UniHack dataset once available.
-   (Step 6A done: input parsing + 252-column delivery mapping + delivery CSV
-   writer against the real files; enrichment stages still to come.)
-2. Implement a real LLM provider adapter (e.g. DeepSeek) behind `LLMClient._complete()`.
-   (Step 6C done: the real DeepSeek adapter, offline-tested; Step 6D wires it
-   into the single-product enrichment pipeline.)
-3. Implement discovery providers (search / direct-URL / document) behind `sources/discovery.py`.
-   (Step 6B done: the real search provider; direct-URL and document providers
-   still to come.)
-4. Implement pipeline stages: discovery → retrieval (`retrieve_candidate`) →
-   extraction (`ExtractionService.extract`) → validation
-   (`ValidationService.validate`) → description.
-   (Step 6D done: the single-product pipeline covers everything except
-   description generation; batch processing is still to come.)
-5. Load the official UniHack resources when they arrive and implement provider
-   adapters (LOV / UOM / manufacturer-brand) behind the existing interfaces.
-6. Wire REST endpoints for lookup, batch, dashboard, and downloads.
-6. Build the frontend upload/dashboard/review UI on top of the API.
+1. Load the official UniHack resources when they arrive and implement
+   provider adapters (LOV / UOM / manufacturer-brand) behind the existing
+   interfaces. (Step 6A done: input parsing + 252-column delivery mapping +
+   delivery CSV writer against the real files; validation framework ready.)
+2. Exercise the description-generation stage (Step 9) with real provider
+   credentials and refine the copy against the official delivery templates.
+3. Optional: async batch processing with progress/job polling for full
+   1000-row runs, and Excel export of delivery files.

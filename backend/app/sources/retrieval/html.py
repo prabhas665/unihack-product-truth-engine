@@ -15,7 +15,7 @@ import httpx
 
 from app.core.domain import SourceType
 from app.sources.candidates import SourceCandidate
-from app.sources.retrieval.limits import RetrievalLimits
+from app.sources.retrieval.limits import RetrievalLimits, truncate_text
 from app.sources.retrieval.models import (
     EvidenceRecord,
     ExtractionStatus,
@@ -176,6 +176,7 @@ class HtmlFetcher:
 
         html = body.decode("utf-8", errors="replace")
         text = extract_html_text(html)
+        text = truncate_text(text, limits.max_text_chars)
         title = extract_html_title(html)
         canonical = extract_canonical_url(html, candidate.url)
 

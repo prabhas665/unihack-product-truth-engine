@@ -4,4 +4,6 @@ pydantic-settings
 sqlalchemy
 httpx
 pypdf
+certifi
 pytest
+

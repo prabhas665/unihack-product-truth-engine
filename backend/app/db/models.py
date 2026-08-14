@@ -38,7 +38,29 @@ class ProductRecordModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="pending")
     quality_score: Mapped[float] = mapped_column(Float, default=0.0)
-    # JSON payload: attributes, evidence, conflicts (see app.core.domain).
+    # JSON payload: full EnrichmentResult (kept for backward compatibility).
     payload: Mapped[str] = mapped_column(Text, default="{}")
+
+    # ----------------------------------------------------------------------
+    # Step 10B persistent product-intelligence fields
+    # ----------------------------------------------------------------------
+    # These structured columns let the API reuse a stored product without
+    # decoding the whole opaque ``payload`` JSON. They are populated by the
+    # repository layer ONLY after a successful pipeline run; a failed run
+    # never reaches them.
+    #
+    # Security: no API keys, Authorization headers, provider settings or
+    # secrets are ever serialized into these fields.
+    raw_description: Mapped[str] = mapped_column(Text, default="")
+    sources_json: Mapped[str] = mapped_column(Text, default="[]")
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    attributes_json: Mapped[str] = mapped_column(Text, default="{}")
+    descriptions_json: Mapped[str] = mapped_column(Text, default="{}")
+    validation_json: Mapped[str] = mapped_column(Text, default="{}")
+    enrichment_history_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_enriched_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    source_freshness_days: Mapped[int] = mapped_column(Integer, default=30)
 
     job: Mapped[Job] = relationship(back_populates="records")

@@ -15,10 +15,19 @@ node_modules/
 dist/
 *.local
 
+# Exception: the production frontend build is committed so a single-service
+# Render deploy (FastAPI serving frontend/dist same-origin) works without a
+# Node toolchain at build time. Rebuild with `npm --prefix frontend run build`
+# and re-commit after frontend changes.
+!frontend/dist/
+
 # Runtime data (SQLite DB, uploads, downloaded evidence)
 data/
 *.db
 *.sqlite3
+
+# Generated evaluation reports (non-secret, but not source)
+backend/reports/
 
 # IDE / OS
 .vscode/

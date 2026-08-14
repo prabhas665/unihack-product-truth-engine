@@ -16,7 +16,12 @@ from app.sources.retrieval.html import (
     extract_html_text,
     extract_html_title,
 )
-from app.sources.retrieval.limits import RetrievalLimits, retrieval_limits_from_settings
+from app.sources.retrieval.limits import (
+    RetrievalLimits,
+    TRUNCATION_MARKER,
+    retrieval_limits_from_settings,
+    truncate_text,
+)
 from app.sources.retrieval.models import (
     EvidenceRecord,
     ExtractionStatus,
@@ -39,6 +44,8 @@ __all__ = [
     "RetrievalErrorKind",
     "RetrievalLimits",
     "RetrievalStatus",
+    "TRUNCATION_MARKER",
+    "truncate_text",
     "default_fetchers",
     "extract_canonical_url",
     "extract_html_text",

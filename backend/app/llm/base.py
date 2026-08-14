@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable, Type
 
 from pydantic import BaseModel, ValidationError
@@ -39,6 +40,14 @@ from app.llm.types import (
     LLMRequest,
     StructuredCompletionRequest,
     StructuredRequest,
+)
+
+
+# Bounded worker pool for LLM calls. Providers are thread-safe (httpx.Client
+# supports concurrent requests) and each call passes its own idle-timeout, so
+# an orphaned worker always terminates on its own transport timeout.
+_CALL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="llm-call"
 )
 
 
@@ -129,13 +138,36 @@ class LLMClient(ABC):
         return self._validate(data, schema)
 
     def _call(self, request: LLMRequest, prompt: str) -> str:
-        """Invoke the provider hook and map failures onto the typed errors."""
+        """Invoke the provider hook and map failures onto the typed errors.
+
+        A hard wall-clock deadline is enforced around every provider call:
+        even when the underlying transport has no total-deadline (httpx only
+        applies an idle-read timeout), the call is bounded here and surfaced
+        as ``LLMTimeoutError`` so a stuck LLM can never leave a stage RUNNING
+        forever. The provider still receives ``timeout_seconds`` (used as its
+        own idle backstop), so orphaned worker threads terminate promptly.
+        """
+        timeout = request.timeout_seconds or settings.llm_timeout_seconds
         try:
+            if timeout and timeout > 0:
+                future = _CALL_EXECUTOR.submit(
+                    self._complete,
+                    prompt,
+                    system_prompt=request.system_prompt,
+                    temperature=request.temperature,
+                    timeout_seconds=timeout,
+                )
+                try:
+                    return future.result(timeout=timeout)
+                except FutureTimeout:
+                    raise LLMTimeoutError(
+                        f"{self.provider}: wall-clock timeout after {timeout}s"
+                    )
             return self._complete(
                 prompt,
                 system_prompt=request.system_prompt,
                 temperature=request.temperature,
-                timeout_seconds=request.timeout_seconds,
+                timeout_seconds=timeout,
             )
         except LLMError:
             raise
@@ -151,6 +183,7 @@ class LLMClient(ABC):
             raise LLMProviderUnavailableError(
                 f"{self.provider}: provider call failed: {exc}"
             ) from exc
+
 
     def _parse_json(self, raw: str) -> Any:
         """Parse model output, tolerating markdown code fences."""

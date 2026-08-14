@@ -79,6 +79,10 @@ class CandidateAttribute(BaseModel):
     evidence_ids: list[str] = Field(..., min_length=1)
     # Concise, evidence-based, user-safe note (never chain-of-thought).
     notes: str = ""
+    # Exact short excerpt of the supporting evidence text (Step 8B),
+    # resolved deterministically from the retrieved record; "" means no
+    # verbatim quote could be resolved ("Evidence quote unavailable").
+    quote: str = ""
 
 
 class RejectedAttribute(BaseModel):

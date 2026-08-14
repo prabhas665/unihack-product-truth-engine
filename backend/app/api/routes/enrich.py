@@ -1,31 +1,205 @@
-"""POST /api/enrich: single-product enrichment (Step 6D).
+"""POST /api/enrich: single-product enrichment (Step 6D / Step 8B / Step 10B).
 
-Accepts the six official UniHack input fields as JSON and returns the full,
-reviewable EnrichmentResult. The service is built per request from settings
-(real discovery providers, real retrieval, real LLM provider when
-configured); tests override the service via dependency_overrides to stay
-fully offline.
+Accepts the six official UniHack input fields plus an OPTIONAL
+operator-confirmed manufacturer source URL as JSON and returns the full,
+reviewable EnrichmentResult.
+
+When ``source_url`` is supplied, a ManualUrlProvider is injected for THIS
+request only (never registered globally): the URL becomes a PENDING
+SourceCandidate whose hostname is used only as this request's
+manufacturer-domain candidate, so the SourcePolicy still decides
+ALLOWED/REJECTED (marketplace rejection runs first) and retrieval still
+refuses anything that is not ALLOWED. Without a URL, discovery behaves
+exactly as before. The service is built per request from settings (real
+retrieval, real LLM provider when configured); tests override the service
+via dependency_overrides to stay fully offline.
+
+Step 10B changes:
+* Optional query parameter ``retrieve_from_db=true`` (default false). When
+  true and a FRESH stored record exists for the request's MPN, the stored
+  EnrichmentResult is rebuilt and returned with a ``source`` meta block
+  instead of running the pipeline. When false, the existing pipeline is
+  always invoked (no behavior change for existing callers).
+* After a successful pipeline run, the result is persisted via
+  ``ProductRepository``. A failure during persistence surfaces a
+  sanitized 500; DB internals / secrets are never exposed.
 """
 
-from fastapi import APIRouter, Depends
+from __future__ import annotations
 
+import json
+import traceback
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from app.api.routes.lookup import LookupResult, StoredRecordView
+from app.config import settings
+from app.db.database import get_session
+from app.db.models import Job
+from app.db.repository import (
+    FreshnessVerdict,
+    ProductRepository,
+    build_enrichment_from_payload,
+)
 from app.pipeline.enrichment import (
     EnrichmentRequest,
     EnrichmentResult,
     EnrichmentService,
 )
+from app.sources.candidates import normalize_domain
+from app.sources.discovery import SourceProvider
+from app.sources.providers.manual_url import ManualUrlProvider
 
 router = APIRouter(prefix="/api", tags=["enrich"])
 
 
-def get_enrichment_service() -> EnrichmentService:
-    """Build the pipeline service from current settings."""
-    return EnrichmentService()
+def build_manual_source(
+    source_url: str, title: str = ""
+) -> tuple[list[SourceProvider] | None, list[str] | None]:
+    """Request-scoped manual source override for an optional source URL.
+
+    Returns (providers, manufacturer_domains) to pass into an
+    EnrichmentService: (None, None) when no URL is given (discovery stays
+    settings-driven), or a ManualUrlProvider plus the URL's own hostname as
+    the only manufacturer-domain candidate. The hostname is derived safely
+    via normalize_domain and is never trusted globally; an unparseable
+    URL yields no manufacturer domain, so the policy rejects it like any
+    unknown external domain.
+    """
+    url = (source_url or "").strip()
+    if not url:
+        return None, None
+    domain = normalize_domain(url)
+    domains = [domain] if domain else []
+    return [ManualUrlProvider(url, title=title)], domains
+
+
+def get_enrichment_service(request: EnrichmentRequest) -> EnrichmentService:
+    """Build the pipeline service for one request, from settings + source_url."""
+    providers, manufacturer_domains = build_manual_source(
+        request.source_url, request.Part_Desc
+    )
+    return EnrichmentService(
+        providers=providers,
+        manufacturer_domains=manufacturer_domains,
+    )
+
+
+def _record_to_lookup_view(record) -> StoredRecordView:
+    return StoredRecordView(
+        record_id=record.id,
+        part_number=record.part_number or "",
+        manufacturer=record.manufacturer or "",
+        brand=record.brand or "",
+        description=record.description or "",
+        status=record.status or "",
+        last_enriched_at=record.last_enriched_at.isoformat()
+        if record.last_enriched_at
+        else None,
+        source_freshness_days=record.source_freshness_days or 0,
+    )
 
 
 @router.post("/enrich", response_model=EnrichmentResult)
 def enrich(
     request: EnrichmentRequest,
+    retrieve_from_db: bool = Query(
+        False,
+        description=(
+            "When true and a fresh stored product exists for this MPN, "
+            "return the stored enrichment without running the pipeline."
+        ),
+    ),
     service: EnrichmentService = Depends(get_enrichment_service),
+    session: Session = Depends(get_session),
 ) -> EnrichmentResult:
-    return service.run(request)
+    repo = ProductRepository()
+    mpn = (request.Mfg_Part_Num or "").strip()
+
+    # Step 10B: optional DB-first path. Only ever honors a FRESH hit.
+    if retrieve_from_db and mpn:
+        record, verdict = repo.find_fresh_by_mpn(
+            session, mpn, settings.product_cache_freshness_days
+        )
+        if verdict == FreshnessVerdict.FRESH and record is not None:
+            payload = json.loads(record.payload or "{}")
+            # The stored ``payload`` is the full ``EnrichmentResult.model_dump``;
+            # rebuild through pydantic so the response shape is identical to
+            # a fresh run. Missing/empty payloads raise and fall through to
+            # the pipeline as a defensive fallback.
+            try:
+                rebuilt = build_enrichment_from_payload(payload)
+            except Exception:
+                rebuilt = None
+            if rebuilt is not None:
+                # Attach a small meta block so the UI can show "Loaded from
+                # Product Intelligence Store". The pydantic model would
+                # reject unknown fields, so we smuggle this through a custom
+                # header instead of the body for the API; the frontend reads
+                # ``X-Source`` to drive the banner.
+                from starlette.responses import JSONResponse  # noqa: WPS433
+
+                body = rebuilt.model_dump(mode="json")
+                body["__source__"] = "database"
+                body["__stale__"] = False
+                body["__record_id__"] = record.id
+                body["__last_enriched_at__"] = (
+                    record.last_enriched_at.isoformat()
+                    if record.last_enriched_at
+                    else None
+                )
+                return JSONResponse(
+                    content=body,
+                    media_type="application/json",
+                    headers={
+                        "X-Source": "database",
+                        "X-Stale": "false",
+                        "X-Record-Id": str(record.id),
+                    },
+                )
+
+    # Default path: run the real pipeline.
+    result = service.run(request)
+
+    # Step 10B: persist the result. A failure here becomes a sanitized 500
+    # so the operator knows the pipeline succeeded but the database write
+    # did not; DB internals / secrets / exception args are never returned.
+    try:
+        job = Job(
+            kind="enrich",
+            status=result.processing.status.value,
+            created_at=__import__("datetime").datetime.utcnow(),
+        )
+        session.add(job)
+        session.flush()
+        repo.save_enrichment(
+            session,
+            result,
+            job_id=job.id,
+            run_id=uuid.uuid4().hex,
+            freshness_days=settings.product_cache_freshness_days,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        trace = traceback.format_exc(limit=1)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "enrichment pipeline produced a result but persistence "
+                "failed; the run was not stored. Check the server logs."
+            ),
+            headers={"X-Source": "fresh", "X-Persistence-Error": "true"},
+        ) from None
+
+    return result
+
+
+__all__ = [
+    "LookupResult",
+    "build_manual_source",
+    "enrich",
+    "get_enrichment_service",
+]

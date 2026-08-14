@@ -40,7 +40,6 @@ from app.sources.retrieval import (
     RetrievalErrorKind,
     RetrievalStatus,
 )
-from app.unihack.paths import delivery_reference_path
 from app.unihack.schema import DeliverySchema
 
 ACME_PAGE = "https://www.acme.com/products/dcb518asts06g"
@@ -85,6 +84,27 @@ class FakeRetriever:
         return self.by_url.get(candidate.url, failed_record(candidate.url))
 
 
+DESCRIPTIONS_JSON = json.dumps(
+    {
+        "product_title": "DCB518ASTS06G Sanding Belt 6-Pack",
+        "short_description": "Six-pack of 1/2 x 18 inch sanding belts.",
+        "mobile_description": "Diablo 1/2x18 in sanding belt, 6 pack.",
+        "invoice_description": "Sanding belt 1/2x18 in, pack of 6.",
+        "long_description": (
+            "A six-pack of Diablo sanding belts, each 1/2 inch wide and 18 "
+            "inches long, for belt sanders."
+        ),
+        "retail_description": "Diablo 1/2 in x 18 in sanding belt, 6 pack.",
+        "marketing_description": "Professional sanding belts in a 6-pack.",
+        "item_features": ["1/2 inch width", "18 inch length", "pack of 6"],
+        "with": "Six sanding belts",
+        "application": "Belt sanders",
+        "includes": "6 sanding belts",
+        "product_name": "Sanding Belt",
+    }
+)
+
+
 class FakeLLMClient(LLMClient):
     """An LLMClient returning canned JSON (or raising a typed LLM error)."""
 
@@ -95,10 +115,12 @@ class FakeLLMClient(LLMClient):
         output: ExtractionOutput | None = None,
         raw: str = "",
         error: Exception | None = None,
+        error_on_description: Exception | None = None,
     ) -> None:
         self._output = output
         self._raw = raw
         self._error = error
+        self._error_on_description = error_on_description
 
     def _complete(
         self,
@@ -110,6 +132,10 @@ class FakeLLMClient(LLMClient):
     ) -> str:
         if self._error is not None:
             raise self._error
+        if "PRODUCT IDENTITY" in prompt:
+            if self._error_on_description is not None:
+                raise self._error_on_description
+            return DESCRIPTIONS_JSON
         if self._raw:
             return self._raw
         return json.dumps(self._output.model_dump())
@@ -235,7 +261,7 @@ def acme_evidence() -> list[EvidenceRecord]:
 
 
 def delivery_schema() -> DeliverySchema:
-    return DeliverySchema.from_reference_csv(delivery_reference_path())
+    return DeliverySchema.frozen()
 
 
 def column(schema: DeliverySchema, name: str) -> int:
@@ -270,6 +296,11 @@ class TestHappyPath:
         assert len(result.extraction.attributes) == 2
         assert result.extraction.evidence_ids_used == [EVIDENCE_A]
         assert result.validation is not None
+        assert result.product is not None
+        assert result.product.descriptions.product_title == (
+            "DCB518ASTS06G Sanding Belt 6-Pack"
+        )
+        assert len(result.product.descriptions.item_features) == 3
 
         assert result.delivery.column_count == 252
         assert len(result.delivery.values) == 252
@@ -280,9 +311,37 @@ class TestHappyPath:
         assert values[column(schema, "Mfg_Part_Num")] == "DCB518ASTS06G"
         assert values[column(schema, "Part_Desc")] == default_request().Part_Desc
         assert values[column(schema, "PART_NUMBER")] == "DCB518ASTS06G"
-        assert values[column(schema, "MANUFACTURER_NAME")] == "Freud Inc (2435)"
+        assert values[column(schema, "MANUFACTURER_NAME")] == "Freud"
         assert values[column(schema, "MFR URL")] == ACME_PAGE
         assert values[column(schema, "Ref URL 1")] == ACME_PDF
+        # Generated descriptions land in the official delivery columns,
+        # after UniHack rule enforcement (unit normalization + X spacing).
+        assert values[column(schema, "MOBILE_DESC")] == (
+            "Diablo 1/2 x 18 IN. sanding belt, 6 pack."
+        )
+        assert values[column(schema, "INVOICE_DESC")] == (
+            "SANDING BELT 1/2 X 18 IN. PACK OF 6"
+        )
+        assert values[column(schema, "SHORT_DESC")] == (
+            "Six-pack of 1/2 x 18 inch sanding belts."
+        )
+        assert values[column(schema, "LONG_DESC1")] == (
+            "A six-pack of Diablo sanding belts, each 1/2 inch wide and 18 "
+            "inches long, for belt sanders."
+        )
+        assert values[column(schema, "RETAIL_DESC")] == (
+            "Diablo 1/2 in x 18 in sanding belt, 6 pack."
+        )
+        assert values[column(schema, "MARKETING_DESCRIPTION")] == (
+            "Professional sanding belts in a 6-pack."
+        )
+        assert values[column(schema, "ITEM_FEATURES_1")] == "1/2 inch width"
+        assert values[column(schema, "ITEM_FEATURES_2")] == "18 inch length"
+        assert values[column(schema, "ITEM_FEATURES_3")] == "pack of 6"
+        assert values[column(schema, "With")] == "Six sanding belts"
+        assert values[column(schema, "Application")] == "Belt sanders"
+        assert values[column(schema, "Includes")] == "6 sanding belts"
+        assert values[column(schema, "Product Name")] == "Sanding Belt"
 
         label, value, uom = schema.attribute_slots()[0]
         assert values[column(schema, label)] == "belt_width"
@@ -312,11 +371,12 @@ class TestHappyPath:
             attribute.outcome.value == "not_validated"
             for attribute in result.validation.attributes
         )
-        # BRAND_NAME is blank (input placeholder) - the note is factual,
-        # never a guessed value.
+        # BRAND_NAME is resolved from the verified seed (Part_Manuf ->
+        # Freud), not invented from the input placeholder - never a guessed
+        # value.
         schema = delivery_schema()
-        assert result.delivery.values[column(schema, "BRAND_NAME")] == ""
-        assert any("BRAND_NAME" in reason for reason in result.review_reasons)
+        assert result.delivery.values[column(schema, "BRAND_NAME")] == "Freud"
+        assert any("verified identity" in reason for reason in result.review_reasons)
 
     def test_quality_metrics_are_honest(self):
         result = success_service().run(default_request())
@@ -350,11 +410,58 @@ class TestHappyPath:
         assert rows[0] == delivery_schema().headers
         assert rows[1] == result.delivery.values
 
-    def test_refuses_to_overwrite_reference_file(self):
-        with pytest.raises(ValueError):
-            success_service().run(
-                default_request(), output_path=str(delivery_reference_path())
-            )
+    def test_writes_to_arbitrary_output_path(self, tmp_path):
+        """The delivery row can be written to any caller-chosen CSV path."""
+        out = tmp_path / "out.csv"
+        result = success_service().run(
+            default_request(), output_path=str(out)
+        )
+        assert out.is_file()
+        assert result.delivery.column_count == 252
+
+
+class _SlowFakeLLMClient(LLMClient):
+    """Offline client whose calls sleep past the wall-clock deadline."""
+
+    provider = "fake-slow"
+
+    def __init__(self, sleep_seconds: float = 5.0) -> None:
+        self._sleep = sleep_seconds
+
+    def _complete(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str = "",
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        import time
+
+        time.sleep(self._sleep)
+        return "{}"
+
+
+class TestWallClockTimeout:
+    def test_run_never_hangs_when_llm_exceeds_deadline(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr(settings, "llm_timeout_seconds", 0.2)
+        service = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=_SlowFakeLLMClient(sleep_seconds=5.0),
+        )
+        start = time.perf_counter()
+        result = service.run(default_request())
+        elapsed = time.perf_counter() - start
+        # The hard wall-clock fires at 0.2s; the 5s sleep must not block the run.
+        assert elapsed < 2.0
+        extraction = next(
+            s for s in result.stages if s.stage == StageName.EXTRACTION
+        )
+        assert extraction.status == StageStatus.FAILED
+        assert result.processing.status == ProcessingStatus.FAILED
 
 
 class TestSparseAndFailedRuns:
@@ -528,8 +635,32 @@ class TestExtractionFailureModes:
 
         statuses = {s.stage: s.status for s in result.stages}
         assert statuses[StageName.EXTRACTION] == StageStatus.SKIPPED
+        assert statuses[StageName.DESCRIPTION] == StageStatus.SKIPPED
         assert set(retriever.calls) == {ACME_PAGE, ACME_PDF}
         assert result.review_reasons  # reasons present, nothing fabricated
+
+    def test_description_llm_failure_marks_stage_failed(self):
+        result = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=FakeLLMClient(
+                output=canned_output(),
+                error_on_description=LLMProviderUnavailableError(
+                    "boom: descriptions provider exploded"
+                ),
+            ),
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[StageName.EXTRACTION] == StageStatus.COMPLETED
+        assert statuses[StageName.DESCRIPTION] == StageStatus.FAILED
+        assert statuses[StageName.DELIVERY] == StageStatus.COMPLETED
+        assert result.product is not None
+        assert result.product.descriptions.product_title == ""
+        assert any(
+            "descriptions provider exploded" in r for r in result.review_reasons
+        )
+        assert result.processing.status == ProcessingStatus.FAILED
 
 
 class TestDeliveryShape:

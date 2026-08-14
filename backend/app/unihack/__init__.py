@@ -1,8 +1,10 @@
-"""UniHack dataset integration layer (Step 6A).
+"""UniHack delivery integration layer (Step 6A).
 
-Parses the official UniHack input CSV, loads the official 252-column delivery
-schema from its reference file, maps the internal ProductIntelligence model
-into delivery rows, and writes delivery CSV. Stdlib only; no network.
+Maps the internal ProductIntelligence model into the 252-column UniHack
+delivery format and writes delivery CSV. The 252-column header is frozen in a
+committed artifact (``app.unihack.delivery_headers``) and loaded via
+``DeliverySchema.frozen`` - production routing no longer depends on the
+official reference CSV at runtime. Stdlib only; no network.
 """
 
 from app.unihack.mapper import UniHackDeliveryMapper
@@ -23,19 +25,17 @@ from app.unihack.parser import (
     UniHackInputError,
     UniHackInputParser,
 )
-from app.unihack.paths import (
-    delivery_reference_path,
-    repo_root,
-    unihack_input_path,
-)
+from app.unihack.paths import repo_root
 from app.unihack.schema import (
     EXPECTED_COLUMN_COUNT,
-    SchemaError,
+    DELIVERY_HEADERS,
     DeliverySchema,
+    SchemaError,
 )
 from app.unihack.writer import DeliveryCsvWriter, DeliveryWriteError
 
 __all__ = [
+    "DELIVERY_HEADERS",
     "DeliveryCsvWriter",
     "DeliveryRow",
     "DeliverySchema",
@@ -55,7 +55,5 @@ __all__ = [
     "UniHackInputResult",
     "UniHackInputRow",
     "UniHackRowError",
-    "delivery_reference_path",
     "repo_root",
-    "unihack_input_path",
 ]

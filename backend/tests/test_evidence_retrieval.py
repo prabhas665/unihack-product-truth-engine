@@ -22,8 +22,10 @@ from app.sources.retrieval import (
     RetrievalErrorKind,
     RetrievalLimits,
     RetrievalStatus,
+    TRUNCATION_MARKER,
     retrieval_limits_from_settings,
     retrieve_candidate,
+    truncate_text,
 )
 
 # --- TEST FIXTURES (not UniHack data, not real manufacturers) ----------------
@@ -342,3 +344,67 @@ class TestLimitsAndMapping:
         assert evidence.source_type == SourceType.MANUFACTURER_PRODUCT_PAGE
         assert evidence.source_title == "Acme M1 Controller"
         assert evidence.trust_level == SourceTrustLevel.UNVERIFIED
+
+
+class TestTextCharCap:
+    """The extracted-text cap (RETRIEVAL_MAX_TEXT_CHARS) bounds the stored
+    evidence text AFTER HTML/PDF extraction, independent of the raw byte caps.
+    """
+
+    def test_truncate_text_keeps_head_and_marks_omission(self):
+        text = "A" * 1000
+        capped = truncate_text(text, 200)
+        assert capped.startswith("A" * 200)
+        assert "truncated" in capped
+        assert len(capped) > 200 and len(capped) < 1000
+
+    def test_truncate_text_is_noop_when_under_cap(self):
+        assert truncate_text("short", 200) == "short"
+        assert truncate_text("anything", None) == "anything"
+
+    def test_limits_from_settings_carries_max_text_chars(self, monkeypatch):
+        monkeypatch.setattr(settings, "retrieval_max_text_chars", 7_777)
+        limits = retrieval_limits_from_settings()
+        assert limits.max_text_chars == 7_777
+
+    def test_html_text_is_capped_after_extraction(self):
+        big = "<html><body><p>" + ("M1 controller spec line. " * 1000) + "</p></body></html>"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=big.encode(),
+                headers={"content-type": "text/html"},
+            )
+
+        result = retrieve_candidate(
+            make_candidate(),
+            fetchers=[HtmlFetcher(transport=httpx.MockTransport(handler))],
+            limits=small_limits(max_text_chars=200),
+        )
+        assert result.retrieval_status == RetrievalStatus.SUCCESS
+        assert "truncated" in result.text
+        # head preserved, total bounded by cap + marker
+        assert result.text.startswith("M1 controller spec line")
+        assert len(result.text) <= 200 + len(TRUNCATION_MARKER) + 20
+
+    def test_pdf_text_is_capped_after_extraction(self):
+        long_text = "M1 datasheet line. " * 500
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=make_pdf_bytes(long_text),
+                headers={"content-type": "application/pdf"},
+            )
+
+        result = retrieve_candidate(
+            make_candidate(
+                url="https://acme-controls.example/docs/m1.pdf",
+                source_type=SourceType.MANUFACTURER_TECHNICAL_PDF,
+            ),
+            fetchers=[PdfFetcher(transport=httpx.MockTransport(handler))],
+            limits=small_limits(max_text_chars=200, max_pdf_bytes=100_000),
+        )
+        assert result.retrieval_status == RetrievalStatus.SUCCESS
+        assert "truncated" in result.text
+        assert len(result.text) <= 200 + len(TRUNCATION_MARKER) + 20

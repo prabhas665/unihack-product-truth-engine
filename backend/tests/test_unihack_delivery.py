@@ -1,8 +1,10 @@
 """Tests for the 252-column delivery format layer (Step 6A).
 
-Uses the ACTUAL official reference file (``Unihack_ Expected Output -
-Delivery Format.csv``) to build and validate the schema — the sanctioned
-exception to the generic-fixtures convention.
+The schema is built from the FROZEN artifact (``DeliverySchema.frozen``), which
+is exactly the official 252-column header. A dev/evaluation fixture copy of the
+official reference file is used only where a test explicitly compares against
+the source bytes (byte-exact header contract). Production code never reads
+either official file.
 """
 
 import csv
@@ -19,6 +21,7 @@ from app.core.domain import (
 )
 from app.core.domain.enums import SourceType
 from app.unihack import (
+    DELIVERY_HEADERS,
     DeliveryCsvWriter,
     DeliveryRow,
     DeliverySchema,
@@ -26,11 +29,10 @@ from app.unihack import (
     SchemaError,
     UniHackDeliveryMapper,
     UniHackInputParser,
-    delivery_reference_path,
-    unihack_input_path,
 )
+from app.unihack.paths import delivery_fixture_path, input_fixture_path
 
-schema = DeliverySchema.from_reference_csv(delivery_reference_path())
+schema = DeliverySchema.frozen()
 mapper = UniHackDeliveryMapper(schema)
 
 
@@ -46,7 +48,7 @@ def test_schema_headers_are_unique_and_non_blank():
 
 
 def test_schema_header_order_matches_reference_file():
-    with delivery_reference_path().open(
+    with delivery_fixture_path().open(
         "r", encoding="utf-8-sig", newline=""
     ) as fh:
         reference_header = next(csv.reader(fh))
@@ -101,7 +103,7 @@ def test_minimal_product_maps_to_252_blank_cells():
 
 
 def test_input_passthrough_echoes_raw_values():
-    result = UniHackInputParser().parse_path(unihack_input_path())
+    result = UniHackInputParser().parse_path(input_fixture_path())
     input_row = result.rows[0]
     product = ProductIntelligence(identity=input_row.to_identity())
     row = mapper.map(product, input_row=input_row)
@@ -129,14 +131,37 @@ def test_fillable_identity_columns_when_verified():
             manufacturer="Freud Inc (2435)",
             brand="Diablo",
             sku="SKU-9",
+            verified_manufacturer="Freud",
+            verified_brand="Diablo",
+            verified_trade_name="",
         )
     )
     row = mapper.map(product)
     assert row.values[schema.index_of("PART_NUMBER")] == "DCB518ASTS06G"
     assert row.values[schema.index_of("SKU - MY_PART_NUMBER")] == "SKU-9"
-    assert row.values[schema.index_of("MANUFACTURER_NAME")] == "Freud Inc (2435)"
+    # MANUFACTURER_NAME/BRAND_NAME come from the verified identity, not the
+    # raw input tokens.
+    assert row.values[schema.index_of("MANUFACTURER_NAME")] == "Freud"
     assert row.values[schema.index_of("BRAND_NAME")] == "Diablo"
+    assert row.values[schema.index_of("TRADE_NAME")] == ""
     assert not any("PART_NUMBER" in note for note in row.notes)
+
+
+def test_verified_identity_blank_when_unverified():
+    product = ProductIntelligence(
+        identity=ProductIdentity(
+            mpn="UNKNOWN-MPN",
+            manufacturer="-- Unbranded --",
+            brand="-- Unbranded --",
+        )
+    )
+    row = mapper.map(product)
+    assert row.values[schema.index_of("MANUFACTURER_NAME")] == ""
+    assert row.values[schema.index_of("BRAND_NAME")] == ""
+    assert any(
+        "MANUFACTURER_NAME" in note and "enrichment" in note
+        for note in row.notes
+    )
 
 
 def test_attributes_serialize_in_insertion_order_with_units():
@@ -324,7 +349,7 @@ def test_unknown_asset_column_noted_and_skipped():
 
 
 def test_real_input_rows_map_to_full_width_delivery_rows():
-    result = UniHackInputParser().parse_path(unihack_input_path())
+    result = UniHackInputParser().parse_path(input_fixture_path())
     for input_row in result.rows[:3]:
         product = ProductIntelligence(identity=input_row.to_identity())
         row = mapper.map(product, input_row=input_row)
@@ -379,7 +404,7 @@ def test_unicode_survives_round_trip(tmp_path):
 def test_written_header_identical_to_reference_header(tmp_path):
     out = tmp_path / "header_only.csv"
     DeliveryCsvWriter(schema).write_path(out, [])
-    reference_line = delivery_reference_path().read_text(
+    reference_line = delivery_fixture_path().read_text(
         encoding="utf-8-sig"
     ).splitlines()[0]
     written_line = out.read_text(encoding="utf-8-sig").splitlines()[0]
@@ -409,3 +434,50 @@ def test_writer_writes_many_rows(tmp_path):
     with out.open("r", encoding="utf-8-sig", newline="") as fh:
         reader = list(csv.reader(fh))
     assert len(reader) == 6  # header + 5 rows
+
+
+# ------------------------------------------------------- formula injection --
+
+
+def test_escape_formula_policy():
+    from app.unihack.writer import escape_formula
+
+    # Always escaped: nothing legitimate starts with these.
+    assert escape_formula("") == ""
+    assert escape_formula("=1+1") == "'=1+1"
+    assert escape_formula("+44 1234") == "'+44 1234"
+    assert escape_formula("@cmd") == "'@cmd"
+    # "-" is escaped only when it starts something that could parse as an
+    # expression...
+    assert escape_formula("-SUM(A1)") == "'-SUM(A1)"
+    # ...never for negative numbers, the official "-" placeholder, the
+    # official "-- ... --" placeholder tokens, or hyphenated part numbers.
+    assert escape_formula("-") == "-"
+    assert escape_formula("-5") == "-5"
+    assert escape_formula("-5.5 kg") == "-5.5 kg"
+    assert escape_formula("-- Unbranded --") == "-- Unbranded --"
+    assert escape_formula("-- No Unilog Brand --") == "-- No Unilog Brand --"
+    assert escape_formula("XLC10ZW-2") == "XLC10ZW-2"
+    assert escape_formula("18 in") == "18 in"
+    # A leading space already forces Excel to treat the cell as text.
+    assert escape_formula("  =1+1") == "  =1+1"
+
+
+def test_writer_escapes_formula_values(tmp_path):
+    from app.unihack.writer import escape_formula
+
+    values = [""] * schema.count
+    values[0] = "=cmd"
+    values[1] = "-SUM(A1)"
+    values[2] = "-5.5"
+    values[3] = "-"
+    row = DeliveryRow(values=values)
+    out = tmp_path / "escaped.csv"
+    DeliveryCsvWriter(schema).write_path(out, [row])
+    with out.open("r", encoding="utf-8-sig", newline="") as fh:
+        data = list(csv.reader(fh))[1]
+    assert data[0] == "'=cmd"
+    assert data[1] == "'-SUM(A1)"
+    assert data[2] == "-5.5"
+    assert data[3] == "-"
+    assert all(escape_formula(v) == data[i] for i, v in enumerate(values))
