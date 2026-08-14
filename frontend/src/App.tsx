@@ -37,6 +37,17 @@ const FIELD_LABELS: { key: keyof EnrichmentRequest; label: string }[] = [
   { key: "Part_Manuf", label: "Part Manuf" },
 ];
 
+function isMpnOnlyInput(r: EnrichmentRequest): boolean {
+  return (
+    !r.Part_Desc &&
+    !r.E1_Brand &&
+    !r.Unilog_Brand &&
+    !r.DIB_Brand &&
+    !r.Part_Manuf &&
+    !r.source_url
+  );
+}
+
 const STAGE_COLORS: Record<StageStatus, string> = {
   pending: "#9ca3af",
   running: "#3b82f6",
@@ -274,6 +285,7 @@ function SingleProductTab() {
   const [loading, setLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [retrieveFromDb, setRetrieveFromDb] = useState(false);
+  const [mode, setMode] = useState<"quick" | "advanced">("quick");
 
   async function onRun() {
     setLoading(true);
@@ -302,6 +314,23 @@ function SingleProductTab() {
 
   return (
     <div className="panel">
+      <nav className="tabs mode-toggle">
+        <button
+          type="button"
+          className={mode === "quick" ? "active" : ""}
+          onClick={() => setMode("quick")}
+        >
+          Quick Demo (MPN)
+        </button>
+        <button
+          type="button"
+          className={mode === "advanced" ? "active" : ""}
+          onClick={() => setMode("advanced")}
+        >
+          Advanced / Official Input (6 fields)
+        </button>
+      </nav>
+
       <form
         className="form"
         onSubmit={(e) => {
@@ -309,35 +338,54 @@ function SingleProductTab() {
           void onRun();
         }}
       >
-        {FIELD_LABELS.map(({ key, label }) => (
-          <label className="field" key={key}>
-            <span>{label}</span>
+        {mode === "quick" ? (
+          <label className="field">
+            <span>Mfg Part Num</span>
             <input
-              value={request[key]}
+              value={request.Mfg_Part_Num}
+              placeholder="e.g. XLC10ZW"
               onChange={(e) =>
-                setRequest((prev) => ({ ...prev, [key]: e.target.value }))
+                setRequest((prev) => ({
+                  ...prev,
+                  Mfg_Part_Num: e.target.value,
+                }))
               }
             />
           </label>
-        ))}
-        <label className="field field-wide">
-          <span>Manufacturer Source URL (optional)</span>
-          <input
-            value={request.source_url ?? ""}
-            placeholder="https://makitatools.com/products/details/..."
-            onChange={(e) =>
-              setRequest((prev) => ({
-                ...prev,
-                source_url: e.target.value,
-              }))
-            }
-          />
-        </label>
-        <p className="field-hint">
-          Must be a manufacturer-owned URL. Its hostname is used only as this
-          request's manufacturer domain and still passes through the source
-          policy — marketplaces (amazon.com, ebay.com, …) are always rejected.
-        </p>
+        ) : (
+          <>
+            {FIELD_LABELS.map(({ key, label }) => (
+              <label className="field" key={key}>
+                <span>{label}</span>
+                <input
+                  value={request[key]}
+                  onChange={(e) =>
+                    setRequest((prev) => ({ ...prev, [key]: e.target.value }))
+                  }
+                />
+              </label>
+            ))}
+            <label className="field field-wide">
+              <span>Manufacturer Source URL (optional)</span>
+              <input
+                value={request.source_url ?? ""}
+                placeholder="https://makitatools.com/products/details/..."
+                onChange={(e) =>
+                  setRequest((prev) => ({
+                    ...prev,
+                    source_url: e.target.value,
+                  }))
+                }
+              />
+            </label>
+            <p className="field-hint">
+              Must be a manufacturer-owned URL. Its hostname is used only as
+              this request's manufacturer domain and still passes through the
+              source policy — marketplaces (amazon.com, ebay.com, …) are always
+              rejected.
+            </p>
+          </>
+        )}
         <div className="form-actions">
           <label className="field-hint" style={{ display: "flex", alignItems: "center", gap: "0.4em" }}>
             <input
@@ -361,6 +409,14 @@ function SingleProductTab() {
       </form>
 
       {runError && <div className="error-box">Run failed: {runError}</div>}
+
+      {result && isMpnOnlyInput(request) && result.processing.status === "needs_review" && (
+        <div className="info-box">
+          No identity or evidence could be resolved from the MPN alone. Open
+          “Advanced / Official Input” and add Part_Desc, Part_Manuf, or a
+          manufacturer source URL to enrich this product.
+        </div>
+      )}
 
       {result && result.__source__ === "database" && !result.__stale__ && (
         <div className="muted" style={{ marginBottom: "0.5em" }}>
