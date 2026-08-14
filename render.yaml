@@ -11,6 +11,14 @@
 # Secrets (LLM_API_KEY, GROQ_API_KEY) are NOT committed. Create them in the
 # Render dashboard (leave the values blank here); they are injected as env
 # vars at runtime and are never sent to the browser.
+#
+# IMPORTANT - RENDER FREE PLAN / EPHEMERAL STORAGE (no persistent disk):
+# This manifest targets the Render Free plan and intentionally uses NO
+# persistent disk. The SQLite database and any generated downloads/reports
+# live under /tmp, which is EPHEMERAL: they are wiped on every restart or
+# redeploy and recreated empty. This is expected for a demo - re-enrich any
+# MPN you need; the pipeline is fully re-runnable and needs no saved state.
+# Do NOT rely on anything written under /tmp surviving a restart.
 
 services:
   - type: web
@@ -26,9 +34,9 @@ services:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: DATABASE_URL
-        value: sqlite:////data/unihack.db
+        value: sqlite:////tmp/unihack.db
       - key: DATA_DIR
-        value: /data
+        value: /tmp
       - key: FRONTEND_DIST_DIR
         value: ../frontend/dist
       # Frontend uses no credentials, so "*" is safe here. For a stricter
@@ -48,11 +56,3 @@ services:
         value: groq/compound-mini
       - key: GROQ_API_KEY
         sync: false
-    # Persistent disk keeps SQLite + batch/delivery CSVs across restarts.
-    # If your plan does not support disks, remove this block; the DB will be
-    # recreated on each deploy (re-enrichable) and batch downloads 404 after
-    # a restart.
-    disk:
-      name: pte-data
-      mountPath: /data
-      sizeGB: 1
