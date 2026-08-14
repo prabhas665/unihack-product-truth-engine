@@ -28,6 +28,7 @@ data/
 
 # Generated evaluation reports (non-secret, but not source)
 backend/reports/
+backend/backend/reports/
 
 # IDE / OS
 .vscode/
