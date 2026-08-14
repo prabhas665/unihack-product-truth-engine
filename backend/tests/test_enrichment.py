@@ -24,6 +24,7 @@ from app.llm import (
     LLMConfigurationError,
     LLMInvalidResponseError,
     LLMProviderUnavailableError,
+    LLMTimeoutError,
 )
 from app.main import app
 from app.pipeline.enrichment import (
@@ -660,6 +661,68 @@ class TestExtractionFailureModes:
         assert any(
             "descriptions provider exploded" in r for r in result.review_reasons
         )
+        assert result.processing.status == ProcessingStatus.FAILED
+
+    def test_description_timeout_is_non_fatal(self):
+        result = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=FakeLLMClient(
+                output=canned_output(),
+                error_on_description=LLMTimeoutError(
+                    "openrouter: wall-clock timeout after 60s"
+                ),
+            ),
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[StageName.EXTRACTION] == StageStatus.COMPLETED
+        assert statuses[StageName.VALIDATION] == StageStatus.COMPLETED
+        assert statuses[StageName.DESCRIPTION] == StageStatus.NEEDS_REVIEW
+        assert statuses[StageName.PRODUCT_INTELLIGENCE] == StageStatus.COMPLETED
+        assert statuses[StageName.DELIVERY] == StageStatus.COMPLETED
+        # The timeout must NOT fail the whole run.
+        assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
+        assert result.processing.status != ProcessingStatus.FAILED
+        # Clear, exact review reason.
+        assert any(
+            r == (
+                "Description generation unavailable: OpenRouter timeout."
+            )
+            for r in result.review_reasons
+        )
+        # No fabricated copy: description fields stay blank.
+        assert result.product is not None
+        assert result.product.descriptions.product_title == ""
+        assert result.product.descriptions.short_description == ""
+        # Extracted attributes and evidence are preserved intact.
+        assert len(result.product.attributes) == 2
+        assert len(result.product.evidence) == 2
+        # 252-column delivery still produced; description slots blank.
+        schema = delivery_schema()
+        assert result.delivery.column_count == 252
+        assert result.delivery.values[column(schema, "MOBILE_DESC")] == ""
+        assert result.delivery.values[column(schema, "SHORT_DESC")] == ""
+        assert result.delivery.values[column(schema, "Mfg_Part_Num")] == (
+            "DCB518ASTS06G"
+        )
+
+    def test_description_non_timeout_failure_stays_fatal(self):
+        # A non-timeout LLM error (provider unavailable) must still fail the
+        # run, proving only timeouts became non-fatal.
+        result = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=FakeLLMClient(
+                output=canned_output(),
+                error_on_description=LLMProviderUnavailableError(
+                    "boom: descriptions provider exploded"
+                ),
+            ),
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[StageName.DESCRIPTION] == StageStatus.FAILED
         assert result.processing.status == ProcessingStatus.FAILED
 
 

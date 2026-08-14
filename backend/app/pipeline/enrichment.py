@@ -61,7 +61,13 @@ from app.extraction import (
     ExtractionResponse,
     ExtractionService,
 )
-from app.llm import LLMClient, LLMConfigurationError, LLMError, get_client
+from app.llm import (
+    LLMClient,
+    LLMConfigurationError,
+    LLMError,
+    LLMTimeoutError,
+    get_client,
+)
 from app.sources.candidates import SourceCandidate
 from app.sources.discovery import (
     DiscoveryContext,
@@ -91,6 +97,13 @@ from app.validation.types import (
     ValidationOutcome,
     ValidationSummary,
 )
+
+
+# Review reason used when description generation cannot complete because the
+# LLM provider exceeded its wall-clock timeout. The run must stay usable: the
+# description fields are left blank (never fabricated) and the stage is marked
+# NEEDS_REVIEW rather than FAILED so the rest of the result survives.
+DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter timeout."
 
 
 class StageName(str, Enum):
@@ -620,12 +633,18 @@ class EnrichmentService:
             else:
                 mark(StageName.DESCRIPTION, StageStatus.COMPLETED, desc_note)
         else:
-            mark(
-                StageName.DESCRIPTION,
-                StageStatus.SKIPPED if desc_note.startswith("skipped")
-                else StageStatus.FAILED,
-                desc_note,
-            )
+            # A hint can arrive even without generated descriptions (e.g. the
+            # LLM timed out): honor it so the timeout is non-fatal and the
+            # stage becomes NEEDS_REVIEW instead of FAILED.
+            if desc_hint is not None:
+                mark(StageName.DESCRIPTION, desc_hint, desc_note)
+            else:
+                mark(
+                    StageName.DESCRIPTION,
+                    StageStatus.SKIPPED if desc_note.startswith("skipped")
+                    else StageStatus.FAILED,
+                    desc_note,
+                )
 
         # -- product intelligence -------------------------------------------
         mark(StageName.PRODUCT_INTELLIGENCE, StageStatus.RUNNING)
@@ -882,6 +901,13 @@ class EnrichmentService:
                 attributes=attributes,
                 quotes=quotes,
             )
+        except LLMTimeoutError as exc:
+            # Hard timeout: never fabricate copy and never fail the run.
+            # Leave descriptions blank and mark the stage NEEDS_REVIEW so the
+            # extracted attributes/evidence and 252-column delivery survive.
+            note = DESCRIPTION_TIMEOUT_REASON
+            reasons.append(DESCRIPTION_TIMEOUT_REASON)
+            return None, note, reasons, StageStatus.NEEDS_REVIEW
         except LLMError as exc:
             note = f"failed ({type(exc).__name__}): {exc}"
             reasons.append(f"description generation failed: {exc}")
