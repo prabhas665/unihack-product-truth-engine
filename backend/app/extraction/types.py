@@ -20,7 +20,8 @@ from app.sources.retrieval import EvidenceRecord
 
 class ExtractionErrorKind(str, Enum):
     SCHEMA_INVALID = "schema_invalid"  # malformed JSON or schema violations
-    LLM_FAILED = "llm_failed"  # provider unavailable/timeout/etc.
+    LLM_FAILED = "llm_failed"  # provider unavailable/failure
+    LLM_TIMEOUT = "llm_timeout"  # provider call exceeded its deadline
 
 
 class ExtractionError(Exception):
