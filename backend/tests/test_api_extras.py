@@ -30,7 +30,7 @@ from app.sources.retrieval import (
     RetrievalStatus,
 )
 
-PAGE = "https://www.acme.com/products/xlc10zw"
+PAGE = "https://www.acme.com/products/cordless-vacuum"
 EVIDENCE = "ev-acme-page-0001"
 
 DESCRIPTIONS_JSON = json.dumps(
@@ -100,7 +100,7 @@ def _success(url: str) -> EvidenceRecord:
         url=url,
         source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
         title=url,
-        text="XLC10ZW Makita 18V cordless vacuum, bare tool.",
+        text="Makita 18V cordless vacuum, bare tool.",
         content_type="text/html",
         retrieval_status=RetrievalStatus.SUCCESS,
         extraction_status=ExtractionStatus.EXTRACTED,

@@ -36,6 +36,8 @@ from typing import Callable
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.config import settings
+
 from app.core.domain import (
     AttributeValue,
     Descriptions,
@@ -61,6 +63,7 @@ from app.extraction import (
     ExtractionResponse,
     ExtractionService,
 )
+from app.extraction.selection import select_extraction_evidence
 from app.llm import (
     LLMClient,
     LLMConfigurationError,
@@ -534,6 +537,7 @@ class EnrichmentService:
         # -- retrieval + extraction + validation ----------------------------
         evidence: list[EvidenceRecord] = []
         usable: list[EvidenceRecord] = []
+        extraction_evidence: list[EvidenceRecord] = []
         extraction: ExtractionResponse | None = None
         validation: ValidationSummary | None = None
 
@@ -573,12 +577,29 @@ class EnrichmentService:
                 if record.retrieval_status == RetrievalStatus.SUCCESS
                 and record.text.strip()
             ]
+            # STEP 20: narrow the extraction evidence to the requested MPN and
+            # enforce a hard context budget. Sibling manufacturer pages that
+            # describe a DIFFERENT product (and never mention the requested
+            # MPN) are dropped, and the remaining MPN-relevant records are kept
+            # in priority order until the budget is reached. This keeps the
+            # extraction prompt small (so a slow free-tier model cannot be
+            # starved/timeout) and prevents cross-product attribute
+            # contamination. The full evidence set is still used for delivery
+            # and the evidence map; only the LLM input is filtered.
+            selection = select_extraction_evidence(
+                discovery.product,
+                usable,
+                budget_chars=settings.extraction_context_budget_chars,
+            )
+            extraction_evidence = selection.selected
+            for reason in selection.dropped:
+                review_reasons.append(reason)
             mark(StageName.EXTRACTION, StageStatus.RUNNING)
             extraction, extraction_note, extraction_reasons = (
                 self._extract(
                     discovery.product,
                     input_row,
-                    usable,
+                    extraction_evidence,
                     review_reasons,
                 )
             )
@@ -588,7 +609,7 @@ class EnrichmentService:
                 mark(StageName.VALIDATION, StageStatus.RUNNING)
                 validation = self._validation_service.validate(
                     extraction.attributes,
-                    {record.evidence_id for record in usable},
+                    {record.evidence_id for record in extraction_evidence},
                 )
                 mark(
                     StageName.VALIDATION,
@@ -623,7 +644,7 @@ class EnrichmentService:
             self._generate_descriptions(
                 discovery.product,
                 validated,
-                usable,
+                extraction_evidence,
             )
         )
         review_reasons.extend(desc_reasons)

@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     # Raw byte caps (above) are unchanged. None disables the text cap.
     retrieval_max_text_chars: int | None = 20_000
 
+    # Extraction evidence-selection budget (Step 20): an upper bound on the
+    # total evidence characters handed to the LLM extraction call. Sibling
+    # manufacturer pages that describe a DIFFERENT product (and never mention
+    # the requested MPN) are excluded, and the remaining, MPN-relevant records
+    # are included in priority order until this budget is reached. Keeps the
+    # extraction prompt comfortably small so a slow free-tier model cannot be
+    # starved by 5 full sibling pages. The per-record cap
+    # (MAX_CHARS_PER_RECORD) is enforced separately inside the extraction
+    # prompt builder.
+    extraction_context_budget_chars: int = 12_000
+
     # Batch guardrails (Step 9B): hard cap on rows enriched per POST /api/batch
     # and per list of MPNs. Requests above the cap are rejected with 422, never
     # silently truncated.
