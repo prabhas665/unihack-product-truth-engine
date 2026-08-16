@@ -135,7 +135,7 @@ class LLMClient(ABC):
         """Run a completion and validate the parsed output against `schema`."""
         raw = self._call(request, prompt)
         data = self._parse_json(raw)
-        return self._validate(data, schema)
+        return self._validate(data, schema, raw_text=raw)
 
     def _call(self, request: LLMRequest, prompt: str) -> str:
         """Invoke the provider hook and map failures onto the typed errors.
@@ -199,13 +199,17 @@ class LLMClient(ABC):
             ) from exc
 
     @staticmethod
-    def _validate(data: Any, schema: Type[BaseModel]) -> BaseModel:
+    def _validate(
+        data: Any, schema: Type[BaseModel], raw_text: str = ""
+    ) -> BaseModel:
         try:
             return schema.model_validate(data)
         except ValidationError as exc:
             raise LLMInvalidResponseError(
                 f"structured response failed validation against "
-                f"{schema.__name__}: {exc}"
+                f"{schema.__name__}: {exc}",
+                raw=data,
+                raw_text=raw_text,
             ) from exc
 
 

@@ -6,6 +6,8 @@ directly; the base client also maps common builtin failures (timeout,
 connection) onto them.
 """
 
+from typing import Any
+
 
 class LLMError(Exception):
     """Base class for all LLM layer errors."""
@@ -36,4 +38,20 @@ class LLMInvalidResponseError(LLMError):
 
     Covers malformed output (not parseable JSON) and structured responses
     that fail validation against the requested schema.
+
+    When the output was parseable JSON, ``raw`` carries the parsed payload
+    and ``raw_text`` the original provider text, so callers can salvage
+    partially valid responses (e.g. per-item recovery) instead of losing
+    everything. Both default to empty so existing raise sites are
+    unaffected.
     """
+
+    def __init__(
+        self,
+        message: str,
+        raw: Any = None,
+        raw_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.raw = raw
+        self.raw_text = raw_text

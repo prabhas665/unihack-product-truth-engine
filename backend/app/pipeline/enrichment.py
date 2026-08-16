@@ -59,6 +59,7 @@ from app.descriptions import (
 from app.identity.mapping import VerifiedBrandLookup, resolve_verified_identity
 from app.extraction import (
     ExtractionError,
+    ExtractionErrorKind,
     ExtractionRequest,
     ExtractionResponse,
     ExtractionService,
@@ -71,6 +72,7 @@ from app.llm import (
     LLMTimeoutError,
     get_client,
 )
+from app.llm.providers.openrouter import OpenRouterClient
 from app.sources.candidates import SourceCandidate
 from app.sources.discovery import (
     DiscoveryContext,
@@ -108,6 +110,35 @@ from app.validation.types import (
 # NEEDS_REVIEW rather than FAILED so the rest of the result survives.
 DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter timeout."
 EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
+
+
+def _build_extraction_fallback_client(
+    reasons: list[str],
+) -> LLMClient | None:
+    """Build the extraction-only fallback client (Step LLM-8).
+
+    Disabled unless LLM_FALLBACK_MODEL is set. The fallback always reuses
+    the primary OpenRouter configuration (same key and base URL) with a
+    different model id. Returns None (failover disabled) when the env var is
+    empty or construction fails - a review reason is appended instead of
+    crashing the run.
+    """
+    model = (settings.llm_fallback_model or "").strip()
+    if not model:
+        return None
+    try:
+        return OpenRouterClient(
+            api_key=settings.llm_api_key,
+            model=model,
+            base_url=settings.llm_base_url,
+            timeout_seconds=(
+                settings.llm_fallback_timeout_seconds
+                or settings.llm_timeout_seconds
+            ),
+        )
+    except LLMConfigurationError as exc:
+        reasons.append(f"extraction fallback model not configured: {exc}")
+        return None
 
 
 class StageName(str, Enum):
@@ -859,7 +890,12 @@ class EnrichmentService:
                 reasons.append(f"extraction failed: {exc}")
                 return None, note, reasons, None
 
-        service = ExtractionService(client)
+        fallback_client = _build_extraction_fallback_client(reasons)
+        service = ExtractionService(
+            client,
+            fallback_client=fallback_client,
+            fallback_timeout_seconds=settings.llm_fallback_timeout_seconds,
+        )
         try:
             response = service.extract(
                 ExtractionRequest(
@@ -877,6 +913,13 @@ class EnrichmentService:
                 # evidence, validation, and 252-column delivery survive.
                 note = EXTRACTION_TIMEOUT_REASON
                 reasons.append(EXTRACTION_TIMEOUT_REASON)
+                return None, note, reasons, StageStatus.NEEDS_REVIEW
+            if fallback_client is not None and exc.kind == ExtractionErrorKind.LLM_FAILED:
+                # Both the primary and the fallback model failed: the run
+                # still survives with the stage NEEDS_REVIEW (evidence and
+                # delivery are preserved, and nothing is fabricated).
+                note = "both the primary and the fallback extraction attempts failed"
+                reasons.append(note)
                 return None, note, reasons, StageStatus.NEEDS_REVIEW
             return None, note, reasons, None
 
@@ -939,6 +982,7 @@ class EnrichmentService:
                 identity=identity,
                 attributes=attributes,
                 quotes=quotes,
+                out_reasons=reasons,
             )
         except LLMTimeoutError as exc:
             # Hard timeout: never fabricate copy and never fail the run.

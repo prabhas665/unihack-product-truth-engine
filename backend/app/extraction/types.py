@@ -11,11 +11,24 @@ not performed here.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from app.core.domain import ProductIdentity
 from app.sources.retrieval import EvidenceRecord
+
+
+def _reject_bool_confidence(value: object) -> object:
+    """Reject bool confidence early so True/False never coerce to 1.0/0.0.
+
+    Pydantic would otherwise coerce a boolean into the float field in lax
+    mode; a boolean carries no numeric meaning here, so the item must fail
+    schema validation and be rejected per attribute.
+    """
+    if isinstance(value, bool):
+        raise ValueError("confidence must be a number 0..1")
+    return value
 
 
 class ExtractionErrorKind(str, Enum):
@@ -53,7 +66,9 @@ class ExtractionOutputItem(BaseModel):
     raw_value: str = ""
     normalized_value: str = ""  # only when obvious and evidence-supported
     unit: str = ""
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: Annotated[
+        float, BeforeValidator(_reject_bool_confidence)
+    ] = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     notes: str = ""
 

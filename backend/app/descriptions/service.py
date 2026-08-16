@@ -21,8 +21,10 @@ review reasons without ever crashing the run.
 
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 from app.core.domain import AttributeValue, Descriptions, ProductIdentity
-from app.llm import LLMClient, StructuredCompletionRequest
+from app.llm import LLMClient, LLMInvalidResponseError, StructuredCompletionRequest
 from app.descriptions.types import GeneratedDescriptions
 
 SYSTEM_PROMPT = (
@@ -33,6 +35,84 @@ SYSTEM_PROMPT = (
     "compliance claims, or marketing superlatives. Every sentence must be "
     "traceable to a supplied fact. Keep each variant concise and truthful."
 )
+
+# Fields that semantically carry ITEM LISTS (the delivery "With",
+# "Application" and "Includes" columns): a provider list[str] is joined
+# deterministically, never rewritten or extended.
+_ITEM_FIELDS = frozenset({"with", "application", "includes"})
+# Deterministic separator for joined itemized fields.
+_FIELD_JOIN_SEPARATOR = "; "
+# Prose fields that must stay single strings.
+_PLAIN_STRING_FIELDS = frozenset(
+    {
+        "product_title",
+        "short_description",
+        "mobile_description",
+        "invoice_description",
+        "long_description",
+        "retail_description",
+        "marketing_description",
+        "product_name",
+    }
+)
+_ALL_FIELDS = frozenset(_ITEM_FIELDS | _PLAIN_STRING_FIELDS | {"item_features"})
+
+
+def _normalize_generated_descriptions(
+    raw: dict,
+) -> tuple[dict, list[str]]:
+    """Per-field normalize a partially schema-invalid description payload.
+
+    Returns (normalized, reasons). Strings are preserved verbatim; None
+    becomes ""; the itemized fields with/application/includes accept a
+    list[str] that is joined with ``_FIELD_JOIN_SEPARATOR`` (blank items
+    dropped, order preserved); item_features keeps its string entries in
+    order and drops non-string ones; any other type on any field blanks
+    ONLY that field. Nothing is fabricated and unknown extra keys are
+    ignored.
+    """
+    normalized: dict = {}
+    reasons: list[str] = []
+    for key, value in raw.items():
+        if key not in _ALL_FIELDS:
+            continue
+        if key == "item_features":
+            if value is None:
+                normalized[key] = []
+            elif isinstance(value, list):
+                kept: list[str] = []
+                for element in value:
+                    if isinstance(element, str):
+                        kept.append(element)
+                    else:
+                        reasons.append(
+                            f"description field 'item_features' dropped a "
+                            f"non-string entry ({type(element).__name__})"
+                        )
+                normalized[key] = kept
+            else:
+                reasons.append(
+                    f"description field 'item_features' had unsupported "
+                    f"value type {type(value).__name__} and was left blank"
+                )
+                normalized[key] = []
+            continue
+        if value is None:
+            normalized[key] = ""
+        elif isinstance(value, str):
+            normalized[key] = value
+        elif key in _ITEM_FIELDS and isinstance(value, list) and all(
+            isinstance(element, str) for element in value
+        ):
+            items = [item for item in value if item.strip()]
+            normalized[key] = _FIELD_JOIN_SEPARATOR.join(items)
+        else:
+            reasons.append(
+                f"description field '{key}' had unsupported value type "
+                f"{type(value).__name__} and was left blank"
+            )
+            normalized[key] = ""
+    return normalized, reasons
 
 _PROMPT_TEMPLATE = """Generate the full set of product descriptions for the product below.
 
@@ -104,17 +184,39 @@ class DescriptionsService:
         identity: ProductIdentity,
         attributes: dict[str, AttributeValue],
         quotes: list[str] | None = None,
+        out_reasons: list[str] | None = None,
     ) -> Descriptions:
-        """Generate all variants; raises the typed LLM errors on failure."""
-        result = self._client.structured_completion(
-            StructuredCompletionRequest(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=build_prompt(
-                    identity, attributes, quotes or []
-                ),
-                output_schema=GeneratedDescriptions,
+        """Generate all variants; raises the typed LLM errors on failure.
+
+        A partially schema-invalid response (one malformed field among valid
+        ones) is salvaged per field by ``_normalize_generated_descriptions``:
+        valid variants are preserved verbatim and only the malformed field is
+        blanked, with a reason appended to ``out_reasons`` (when given). An
+        unusable whole response (not JSON, not a dict) still raises, exactly
+        as before; nothing is ever fabricated.
+        """
+        try:
+            result = self._client.structured_completion(
+                StructuredCompletionRequest(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=build_prompt(
+                        identity, attributes, quotes or []
+                    ),
+                    output_schema=GeneratedDescriptions,
+                )
             )
-        )
+        except LLMInvalidResponseError as exc:
+            if not isinstance(exc.raw, dict):
+                raise
+            normalized, reasons = _normalize_generated_descriptions(exc.raw)
+            try:
+                result = GeneratedDescriptions.model_validate(normalized)
+            except ValidationError:
+                # Normalization only ever produces valid types; if this
+                # still fails, fail safely with the original error.
+                raise exc from None
+            if out_reasons is not None:
+                out_reasons.extend(reasons)
         assert isinstance(result, GeneratedDescriptions)
         return Descriptions(
             product_title=result.product_title,

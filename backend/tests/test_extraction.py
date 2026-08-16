@@ -189,15 +189,17 @@ class TestRejectedClaims:
 
 
 class TestInvalidLlmOutput:
-    def test_invalid_confidence_rejected(self):
+    def test_invalid_confidence_rejected_per_item(self):
         record = make_evidence("ev-1", "The M1 is 24 V.")
         service = service_with(
             '{"items": [{"name": "voltage", "raw_value": "24", '
             '"confidence": 1.5, "evidence_ids": ["ev-1"]}]}'
         )
-        with pytest.raises(ExtractionError) as exc:
-            service.extract(make_request(record))
-        assert exc.value.kind == ExtractionErrorKind.SCHEMA_INVALID
+        response = service.extract(make_request(record))
+        assert response.attributes == []
+        assert len(response.rejected) == 1
+        assert response.rejected[0].name == "voltage"
+        assert "outside the valid range" in response.rejected[0].reason
 
     def test_malformed_llm_response_handled_safely(self):
         record = make_evidence("ev-1", "The M1 is 24 V.")
