@@ -481,3 +481,128 @@ def test_writer_escapes_formula_values(tmp_path):
     assert data[2] == "-5.5"
     assert data[3] == "-"
     assert all(escape_formula(v) == data[i] for i, v in enumerate(values))
+
+
+# ------------------------------------------------------- MPN-relevant URLs --
+
+
+def _evidence(ev_id: str, url: str, source_type: SourceType, title: str = "") -> Evidence:
+    return Evidence(
+        id=ev_id,
+        source_url=url,
+        source_type=source_type,
+        source_title=title or url,
+    )
+
+
+def _product(mpn: str, evidence: list[Evidence]) -> ProductIntelligence:
+    return ProductIntelligence(
+        identity=ProductIdentity(mpn=mpn),
+        evidence={e.id: e for e in evidence},
+    )
+
+
+def _ref_urls(row: DeliveryRow, schema: DeliverySchema) -> list[str]:
+    return [
+        row.values[schema.index_of(f"Ref URL {i}")]
+        for i in range(1, 6)
+    ]
+
+
+class TestMfrUrlMpnRelevance:
+    """Delivery URL traceability: MFR URL and Ref URLs must identify the
+    requested MPN, never sibling manufacturer pages."""
+
+    XLC10ZW = "https://makitatools.com/products/details/XLC10ZW"
+    SIBLINGS = [
+        "https://makitatools.com/products/details/XLC08ZB",
+        "https://makitatools.com/products/details/XLC09ZB",
+        "https://makitatools.com/products/details/XLC10R1W",
+    ]
+
+    def test_exact_page_present_and_siblings_excluded(self):
+        exact = _evidence("e-exact", self.XLC10ZW, SourceType.MANUFACTURER_PRODUCT_PAGE)
+        siblings = [
+            _evidence(f"e-sib-{i}", url, SourceType.MANUFACTURER_PRODUCT_PAGE)
+            for i, url in enumerate(self.SIBLINGS)
+        ]
+        row = mapper.map(_product("XLC10ZW", [exact] + siblings))
+
+        assert row.values[schema.index_of("MFR URL")] == self.XLC10ZW
+        for url in _ref_urls(row, schema):
+            assert url == ""
+
+    def test_exact_page_absent_leaves_mfr_blank_and_siblings_out(self):
+        siblings = [
+            _evidence(f"e-sib-{i}", url, SourceType.MANUFACTURER_PRODUCT_PAGE)
+            for i, url in enumerate(self.SIBLINGS)
+        ]
+        row = mapper.map(_product("XLC10ZW", siblings))
+
+        assert row.values[schema.index_of("MFR URL")] == ""
+        for url in _ref_urls(row, schema):
+            assert url == ""
+
+    def test_sibling_that_mentions_requested_mpn_is_a_ref_url(self):
+        exact = _evidence("e-exact", self.XLC10ZW, SourceType.MANUFACTURER_PRODUCT_PAGE)
+        compatible = _evidence(
+            "e-compat",
+            "https://makitatools.com/products/details/XLC10R1W",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="XLC10R1W - compatible with XLC10ZW",
+        )
+        row = mapper.map(_product("XLC10ZW", [exact, compatible]))
+
+        assert row.values[schema.index_of("MFR URL")] == self.XLC10ZW
+        refs = _ref_urls(row, schema)
+        assert refs[0] == compatible.source_url
+        assert refs[1:] == [""] * 4
+
+    def test_generic_manufacturer_page_is_not_cited(self):
+        generic = _evidence(
+            "e-generic",
+            "https://makitatools.com/products",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="Makita Tools",
+        )
+        row = mapper.map(_product("XLC10ZW", [generic]))
+
+        assert row.values[schema.index_of("MFR URL")] == ""
+        for url in _ref_urls(row, schema):
+            assert url == ""
+
+    def test_prohibited_or_rejected_candidates_never_cited(self):
+        # Rejected/prohibited candidates are filtered by SourcePolicy before
+        # ProductIntelligence is built, so they can never reach the mapper.
+        # Assert a known-rejected URL appears nowhere in the delivery row.
+        rejected = "https://marketplace.example/xlc10zw-listing"
+        exact = _evidence("e-exact", self.XLC10ZW, SourceType.MANUFACTURER_PRODUCT_PAGE)
+        row = mapper.map(_product("XLC10ZW", [exact]))
+
+        assert row.values[schema.index_of("MFR URL")] == self.XLC10ZW
+        assert rejected not in _ref_urls(row, schema)
+
+    def test_no_relevant_references_leaves_all_urls_blank(self):
+        unrelated = [
+            _evidence(f"e-{i}", url, SourceType.MANUFACTURER_PRODUCT_PAGE)
+            for i, url in enumerate(self.SIBLINGS)
+        ]
+        row = mapper.map(_product("XLC99ZZ", unrelated))
+
+        assert row.values[schema.index_of("MFR URL")] == ""
+        for url in _ref_urls(row, schema):
+            assert url == ""
+
+    def test_fewer_than_five_relevant_leaves_rest_blank(self):
+        exact = _evidence("e-exact", self.XLC10ZW, SourceType.MANUFACTURER_PRODUCT_PAGE)
+        compatible = _evidence(
+            "e-compat",
+            "https://makitatools.com/products/details/XLC10R1W",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="XLC10R1W compatible with XLC10ZW",
+        )
+        row = mapper.map(_product("XLC10ZW", [exact, compatible]))
+
+        refs = _ref_urls(row, schema)
+        assert refs[0] == compatible.source_url
+        assert refs[1:] == [""] * 4

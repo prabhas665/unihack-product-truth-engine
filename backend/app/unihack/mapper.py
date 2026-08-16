@@ -15,6 +15,7 @@ Rules:
 """
 
 from app.core.domain.enums import SourceType
+from app.core.domain.evidence import Evidence
 from app.core.domain.product import ProductIntelligence
 from app.unihack.models import DeliveryRow, UniHackInputRow
 from app.unihack.schema import (
@@ -24,6 +25,25 @@ from app.unihack.schema import (
 
 NOTE_ENRICHMENT = "requires enrichment/verification"
 NOTE_TAXONOMY = "requires classification from the official UniHack taxonomy"
+
+
+def _canonical_mpn(mpn: str | None) -> str:
+    """One canonical MPN representation for delivery relevance checks."""
+    return (mpn or "").strip().upper()
+
+
+def _references_mpn(evidence: "Evidence", mpn: str) -> bool:
+    """True when the evidence's URL or title identifies the requested MPN.
+
+    Delivery citations must point at evidence for the REQUESTED product, not
+    at sibling manufacturer pages that merely share the manufacturer domain.
+    The domain Evidence model only carries url/title (snippet is not
+    populated), so relevance is checked on those two fields.
+    """
+    if not mpn:
+        return True
+    key = f"{evidence.source_url} {evidence.source_title}".upper()
+    return mpn in key
 
 
 class UniHackDeliveryMapper:
@@ -87,21 +107,60 @@ class UniHackDeliveryMapper:
         evidence = sorted(product.evidence.values(), key=lambda e: e.id)
         if not evidence:
             return
-        product_page = next(
+        requested = _canonical_mpn(product.identity.mpn)
+        if not requested:
+            # Legacy behavior when no MPN identity is available: keep the
+            # historical selection (first product page, else first evidence).
+            product_page = next(
+                (
+                    e
+                    for e in evidence
+                    if e.source_type == SourceType.MANUFACTURER_PRODUCT_PAGE
+                ),
+                None,
+            )
+            if product_page is not None:
+                self._set(row, "MFR URL", product_page.source_url)
+                rest = [e for e in evidence if e.id != product_page.id]
+            else:
+                self._set(row, "MFR URL", evidence[0].source_url)
+                rest = evidence[1:]
+            for offset, evidence_item in enumerate(rest[:5]):
+                self._set(
+                    row, f"Ref URL {offset + 1}", evidence_item.source_url
+                )
+            return
+
+        # MPN-aware delivery traceability: only evidence that references the
+        # requested MPN may become a citation. MFR URL must be the exact
+        # requested-MPN manufacturer product page (never a sibling); Ref URLs
+        # contain only relevant evidence, with unused cells left blank.
+        exact_page = next(
             (
                 e
                 for e in evidence
                 if e.source_type == SourceType.MANUFACTURER_PRODUCT_PAGE
+                and requested in (e.source_url or "").upper()
             ),
             None,
         )
-        if product_page is not None:
-            self._set(row, "MFR URL", product_page.source_url)
-            rest = [e for e in evidence if e.id != product_page.id]
+        if exact_page is not None:
+            self._set(row, "MFR URL", exact_page.source_url)
+            relevant = [
+                e
+                for e in evidence
+                if e.id != exact_page.id and _references_mpn(e, requested)
+            ]
         else:
-            self._set(row, "MFR URL", evidence[0].source_url)
-            rest = evidence[1:]
-        for offset, evidence_item in enumerate(rest[:5]):
+            # No exact-MPN manufacturer page was retrieved; never cite a
+            # sibling page as the manufacturer URL.
+            self._set(row, "MFR URL", "")
+            relevant = [
+                e for e in evidence if _references_mpn(e, requested)
+            ]
+        for offset, evidence_item in enumerate(
+            sorted(relevant, key=lambda e: e.id)[:5]
+        ):
             self._set(row, f"Ref URL {offset + 1}", evidence_item.source_url)
 
     # -- descriptions ------------------------------------------------------
