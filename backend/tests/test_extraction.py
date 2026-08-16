@@ -19,7 +19,7 @@ from app.extraction import (
     ExtractionService,
     to_domain_attribute_values,
 )
-from app.llm import FakeLLMClient, LLMProviderUnavailableError, LLMTimeoutError
+from app.llm import FakeLLMClient, LLMProviderUnavailableError
 from app.sources.retrieval import EvidenceRecord, RetrievalStatus
 
 
@@ -213,13 +213,6 @@ class TestInvalidLlmOutput:
         with pytest.raises(ExtractionError) as exc:
             ExtractionService(client).extract(make_request(record))
         assert exc.value.kind == ExtractionErrorKind.LLM_FAILED
-
-    def test_provider_timeout_mapped_to_llm_timeout_kind(self):
-        record = make_evidence("ev-1", "The M1 is 24 V.")
-        client = FakeLLMClient(error=LLMTimeoutError("wall-clock timeout"))
-        with pytest.raises(ExtractionError) as exc:
-            ExtractionService(client).extract(make_request(record))
-        assert exc.value.kind == ExtractionErrorKind.LLM_TIMEOUT
 
 
 class TestConflicts:

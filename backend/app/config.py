@@ -22,14 +22,6 @@ class Settings(BaseSettings):
     # Default timeout for provider calls (seconds); per-request overrides exist.
     llm_timeout_seconds: float = 30.0
 
-    # LLM retry policy: transient provider timeouts are retried up to
-    # ``llm_retry_attempts`` total attempts (1 = no retry) with exponential
-    # backoff (base ``llm_retry_backoff_seconds``, doubled per retry). Only
-    # timeouts are retried; every other typed error surfaces immediately so
-    # deterministic failures are never masked by a retry.
-    llm_retry_attempts: int = 2
-    llm_retry_backoff_seconds: float = 1.0
-
     # Source discovery policy: comma-separated domain patterns (see
     # app/sources/policy.py). No UniHack data is hard-coded here; the
     # official manufacturer domain registry fills in later.

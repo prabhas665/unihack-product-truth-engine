@@ -37,7 +37,6 @@ from app.llm import (
     LLMClient,
     LLMError,
     LLMInvalidResponseError,
-    LLMTimeoutError,
     StructuredCompletionRequest,
 )
 
@@ -121,11 +120,6 @@ class ExtractionService:
                     f"LLM output failed schema validation: {exc}",
                 ) from exc
             output = fallback
-        except LLMTimeoutError as exc:
-            raise ExtractionError(
-                ExtractionErrorKind.LLM_TIMEOUT,
-                f"LLM call timed out: {exc}",
-            ) from exc
         except LLMError as exc:
             raise ExtractionError(
                 ExtractionErrorKind.LLM_FAILED, f"LLM call failed: {exc}"

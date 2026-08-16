@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable, Type
@@ -147,61 +146,43 @@ class LLMClient(ABC):
         as ``LLMTimeoutError`` so a stuck LLM can never leave a stage RUNNING
         forever. The provider still receives ``timeout_seconds`` (used as its
         own idle backstop), so orphaned worker threads terminate promptly.
-
-        Transient provider timeouts are retried (up to
-        ``settings.llm_retry_attempts`` total attempts, exponential backoff)
-        because free/queued endpoints intermittently exceed the deadline;
-        only timeouts are retried - every other typed error surfaces
-        immediately so deterministic failures are never masked.
         """
         timeout = request.timeout_seconds or settings.llm_timeout_seconds
-        attempts = max(
-            1, int(getattr(settings, "llm_retry_attempts", 1) or 1)
-        )
-        backoff = max(
-            0.0, float(getattr(settings, "llm_retry_backoff_seconds", 0.0) or 0.0)
-        )
-        for attempt in range(attempts):
-            try:
-                if timeout and timeout > 0:
-                    future = _CALL_EXECUTOR.submit(
-                        self._complete,
-                        prompt,
-                        system_prompt=request.system_prompt,
-                        temperature=request.temperature,
-                        timeout_seconds=timeout,
-                    )
-                    try:
-                        return future.result(timeout=timeout)
-                    except FutureTimeout:
-                        raise LLMTimeoutError(
-                            f"{self.provider}: wall-clock timeout after {timeout}s"
-                        )
-                return self._complete(
+        try:
+            if timeout and timeout > 0:
+                future = _CALL_EXECUTOR.submit(
+                    self._complete,
                     prompt,
                     system_prompt=request.system_prompt,
                     temperature=request.temperature,
                     timeout_seconds=timeout,
                 )
-            except LLMTimeoutError as exc:
-                if attempt + 1 < attempts:
-                    time.sleep(backoff * (2 ** attempt))
-                    continue
-                raise
-            except LLMError:
-                raise
-            except TimeoutError as exc:
-                raise LLMTimeoutError(
-                    f"{self.provider}: provider call timed out"
-                ) from exc
-            except ConnectionError as exc:
-                raise LLMProviderUnavailableError(
-                    f"{self.provider}: provider unreachable: {exc}"
-                ) from exc
-            except Exception as exc:
-                raise LLMProviderUnavailableError(
-                    f"{self.provider}: provider call failed: {exc}"
-                ) from exc
+                try:
+                    return future.result(timeout=timeout)
+                except FutureTimeout:
+                    raise LLMTimeoutError(
+                        f"{self.provider}: wall-clock timeout after {timeout}s"
+                    )
+            return self._complete(
+                prompt,
+                system_prompt=request.system_prompt,
+                temperature=request.temperature,
+                timeout_seconds=timeout,
+            )
+        except LLMError:
+            raise
+        except TimeoutError as exc:
+            raise LLMTimeoutError(
+                f"{self.provider}: provider call timed out"
+            ) from exc
+        except ConnectionError as exc:
+            raise LLMProviderUnavailableError(
+                f"{self.provider}: provider unreachable: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise LLMProviderUnavailableError(
+                f"{self.provider}: provider call failed: {exc}"
+            ) from exc
 
 
     def _parse_json(self, raw: str) -> Any:

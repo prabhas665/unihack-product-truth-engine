@@ -448,7 +448,6 @@ class TestWallClockTimeout:
         import time
 
         monkeypatch.setattr(settings, "llm_timeout_seconds", 0.2)
-        monkeypatch.setattr(settings, "llm_retry_backoff_seconds", 0.0)
         service = make_service(
             provider=acme_provider(),
             records=acme_evidence(),
@@ -462,10 +461,8 @@ class TestWallClockTimeout:
         extraction = next(
             s for s in result.stages if s.stage == StageName.EXTRACTION
         )
-        # Timeouts surface as NEEDS_REVIEW (non-fatal), never a hang or a FAILED run.
-        assert extraction.status == StageStatus.NEEDS_REVIEW
-        assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
-        assert result.processing.status != ProcessingStatus.FAILED
+        assert extraction.status == StageStatus.FAILED
+        assert result.processing.status == ProcessingStatus.FAILED
 
 
 class TestSparseAndFailedRuns:
@@ -572,34 +569,6 @@ class TestExtractionFailureModes:
         assert any("provider exploded" in r for r in result.review_reasons)
         assert result.processing.status == ProcessingStatus.FAILED
         assert result.processing.errors[0].stage == StageName.EXTRACTION.value
-
-    def test_extraction_timeout_is_non_fatal(self):
-        result = make_service(
-            provider=acme_provider(),
-            records=acme_evidence(),
-            llm=FakeLLMClient(
-                error=LLMTimeoutError(
-                    "openrouter: wall-clock timeout after 60s"
-                )
-            ),
-        ).run(default_request())
-
-        statuses = {s.stage: s.status for s in result.stages}
-        assert statuses[StageName.EXTRACTION] == StageStatus.NEEDS_REVIEW
-        assert statuses[StageName.VALIDATION] == StageStatus.SKIPPED
-        assert statuses[StageName.DESCRIPTION] == StageStatus.SKIPPED
-        assert statuses[StageName.PRODUCT_INTELLIGENCE] == StageStatus.COMPLETED
-        assert statuses[StageName.DELIVERY] == StageStatus.COMPLETED
-        # The timeout must NOT fail the whole run.
-        assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
-        assert result.processing.status != ProcessingStatus.FAILED
-        assert result.processing.errors == []
-        assert result.extraction is None
-        # No fabricated attributes, but the 252-column row still survives.
-        assert result.product is not None
-        assert result.product.attributes == {}
-        assert result.delivery.column_count == 252
-        assert any("timed out" in r for r in result.review_reasons)
 
     def test_malformed_llm_output_marks_extraction_failed(self):
         result = make_service(

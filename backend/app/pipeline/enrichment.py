@@ -59,7 +59,6 @@ from app.descriptions import (
 from app.identity.mapping import VerifiedBrandLookup, resolve_verified_identity
 from app.extraction import (
     ExtractionError,
-    ExtractionErrorKind,
     ExtractionRequest,
     ExtractionResponse,
     ExtractionService,
@@ -596,7 +595,7 @@ class EnrichmentService:
             for reason in selection.dropped:
                 review_reasons.append(reason)
             mark(StageName.EXTRACTION, StageStatus.RUNNING)
-            extraction, extraction_note, extraction_reasons, extraction_hint = (
+            extraction, extraction_note, extraction_reasons = (
                 self._extract(
                     discovery.product,
                     input_row,
@@ -625,17 +624,10 @@ class EnrichmentService:
                                 f"{message.code}: {message.message}"
                             )
             else:
-                # A NEEDS_REVIEW hint (e.g. the LLM timed out) must not fail
-                # the whole run: attributes stay blank for human review.
                 mark(
                     StageName.EXTRACTION,
-                    extraction_hint
-                    if extraction_hint is not None
-                    else (
-                        StageStatus.SKIPPED
-                        if extraction_note.startswith("skipped")
-                        else StageStatus.FAILED
-                    ),
+                    StageStatus.SKIPPED if extraction_note.startswith("skipped")
+                    else StageStatus.FAILED,
                     extraction_note,
                 )
                 mark(StageName.VALIDATION, StageStatus.RUNNING)
@@ -832,13 +824,11 @@ class EnrichmentService:
         input_row: UniHackInputRow,
         usable: list[EvidenceRecord],
         review_reasons: list[str],
-    ) -> tuple[ExtractionResponse | None, str, list[str], StageStatus | None]:
-        """Run AI extraction; returns (response, note, reasons, status hint).
+    ) -> tuple[ExtractionResponse | None, str, list[str]]:
+        """Run AI extraction; returns (response, note, extra review reasons).
 
         Missing LLM configuration and provider/validation failures turn into
-        a FAILED stage with a review reason - never an exception. A provider
-        timeout turns into a NEEDS_REVIEW hint (like description generation):
-        attributes stay blank but the run survives for human review.
+        a FAILED stage with a review reason - never an exception.
         """
         reasons: list[str] = []
         if not usable:
@@ -847,7 +837,7 @@ class EnrichmentService:
                 "extraction skipped: no successfully retrieved evidence "
                 "with extractable text"
             )
-            return None, note, reasons, None
+            return None, note, reasons
 
         client = self._llm_client
         if client is None:
@@ -856,7 +846,7 @@ class EnrichmentService:
             except LLMConfigurationError as exc:
                 note = f"failed: LLM not configured ({exc})"
                 reasons.append(f"extraction failed: {exc}")
-                return None, note, reasons, None
+                return None, note, reasons
 
         service = ExtractionService(client)
         try:
@@ -868,19 +858,9 @@ class EnrichmentService:
                 )
             )
         except ExtractionError as exc:
-            if exc.kind == ExtractionErrorKind.LLM_TIMEOUT:
-                note = (
-                    "needs review: LLM extraction timed out; attributes "
-                    "were left blank for manual review"
-                )
-                reasons.append(
-                    "extraction timed out (the LLM call exceeded its "
-                    "deadline); attributes were left blank"
-                )
-                return None, note, reasons, StageStatus.NEEDS_REVIEW
             note = f"failed ({exc.kind.value}): {exc.message}"
             reasons.append(f"extraction failed ({exc.kind.value}): {exc.message}")
-            return None, note, reasons, None
+            return None, note, reasons
 
         for rejected in response.rejected:
             reasons.append(
@@ -890,7 +870,7 @@ class EnrichmentService:
             f"{len(response.attributes)} accepted, "
             f"{len(response.rejected)} rejected"
         )
-        return response, note, reasons, None
+        return response, note, reasons
 
     def _generate_descriptions(
         self,
