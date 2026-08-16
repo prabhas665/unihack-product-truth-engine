@@ -619,7 +619,7 @@ class TestDiscoveryFlowWithGroqProvider:
         assert result.total_discovered == 0
         assert result.provider_errors == []
 
-    def test_manufacturer_domain_filtering_not_in_request(self):
+    def test_manufacturer_domain_sent_as_site_hint_not_tools(self):
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -633,8 +633,123 @@ class TestDiscoveryFlowWithGroqProvider:
                 product=make_product(), manufacturer_domains=ACME_DOMAINS
             ),
         )
-        # include_domains is enforced by SourcePolicy, not the search API.
+        # The trusted manufacturer domain reaches Groq as a site: query
+        # bias; SourcePolicy remains the sole accept/reject authority, and
+        # the rejected tools primitive is never used.
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:acme-controls.example" in content
         assert "tools" not in captured["body"]
+
+
+# ------------------------------------------------------------ domain site hint --
+
+
+class TestDomainSiteHint:
+    def test_build_body_includes_site_hint_when_domains_present(self):
+        body = GroqSearchApiClient(api_key="test-key")._build_body(
+            '3M "1700-1PK-BB40"', ["3m.com"]
+        )
+        content = body["messages"][0]["content"]
+        assert content == '3M "1700-1PK-BB40" site:3m.com'
+        assert "tools" not in body
+
+    def test_build_body_omits_site_hint_when_no_domains(self):
+        body = GroqSearchApiClient(api_key="test-key")._build_body("q", None)
+        assert body["messages"][0]["content"] == "q"
+        assert "site:" not in body["messages"][0]["content"]
+
+    def test_build_body_site_hint_for_multiple_domains(self):
+        body = GroqSearchApiClient(api_key="test-key")._build_body(
+            "q", ["a.example", "b.example"]
+        )
+        assert body["messages"][0]["content"] == "q site:a.example site:b.example"
+
+    def test_discover_sends_trusted_domain_as_site_hint(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json=search_payload())
+
+        provider = GroqSearchProvider(mock_client(handler))
+        provider.discover(
+            make_product(),
+            DiscoveryContext(
+                product=make_product(), manufacturer_domains=ACME_DOMAINS
+            ),
+        )
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:acme-controls.example" in content
+
+
+class TestDiscoveryRecallBias:
+    @pytest.mark.parametrize(
+        ("mpn", "manufacturer", "domain"),
+        [
+            ("XLC10ZW", "Makita Usa Inc", "makitatools.com"),
+            ("49-94-0013", "Milwaukee Tool", "milwaukeetool.com"),
+            ("1700-1PK-BB40", "3M", "3m.com"),
+            ("WDTS7024RZ", "Whirlpool Corporation", "whirlpool.com"),
+        ],
+    )
+    def test_trusted_domain_reaches_provider_query(
+        self, mpn: str, manufacturer: str, domain: str
+    ):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json=search_payload())
+
+        product = ProductIdentity(manufacturer=manufacturer, mpn=mpn)
+        provider = GroqSearchProvider(mock_client(handler))
+        provider.discover(
+            product,
+            DiscoveryContext(product=product, manufacturer_domains=[domain]),
+        )
+        content = captured["body"]["messages"][0]["content"]
+        assert f"site:{domain}" in content
+        assert product.mpn in content
+
+    def test_run_discovery_allows_official_domain_result_with_site_hint(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(
+                200,
+                json=search_payload(
+                    {
+                        "title": "M1 Controller",
+                        "url": "https://acme-controls.example/products/m1",
+                        "content": "datasheet text",
+                    },
+                    {
+                        "title": "M1 on Amazon",
+                        "url": "https://www.amazon.com/dp/M1",
+                        "content": "listing",
+                    },
+                ),
+            )
+
+        provider = GroqSearchProvider(mock_client(handler))
+        result = run_discovery(
+            make_product(),
+            providers=[provider],
+            context=DiscoveryContext(
+                product=make_product(), manufacturer_domains=ACME_DOMAINS
+            ),
+        )
+        # The site: bias was transmitted AND SourcePolicy still governs:
+        # the official domain is ALLOWED, the marketplace stays PROHIBITED.
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:acme-controls.example" in content
+        assert [c.url for c in result.candidates] == [
+            "https://acme-controls.example/products/m1"
+        ]
+        assert result.candidates[0].status == CandidateStatus.ALLOWED
+        assert len(result.rejected) == 1
+        assert result.rejected[0].status == CandidateStatus.PROHIBITED
 
 
 # ------------------------------------------------------------ provider selection --

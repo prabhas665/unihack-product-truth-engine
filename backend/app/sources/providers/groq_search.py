@@ -172,12 +172,18 @@ class GroqSearchApiClient:
         # the web_search tool primitive is NOT accepted here (the API rejects
         # tools[].type values other than "function"/"mcp", and rejects any
         # tool_choice object). We send a plain chat request and parse the model's
-        # executed_tools search_results. Manufacturer-domain restriction is
-        # enforced downstream by SourcePolicy (DiscoveryContext.manufacturer_domains)
-        # rather than the search API.
+        # executed_tools search_results. The trusted manufacturer domains ARE
+        # passed through as a site: query bias so the search is steered toward
+        # the official pages; SourcePolicy remains the sole authority for
+        # ALLOWED/REJECTED (DiscoveryContext.manufacturer_domains) - the bias
+        # is never a trust decision.
+        content = query
+        if include_domains:
+            sites = " ".join(f"site:{domain}" for domain in include_domains)
+            content = f"{query} {sites}".strip()
         return {
             "model": self._model,
-            "messages": [{"role": "user", "content": query}],
+            "messages": [{"role": "user", "content": content}],
             "n": 1,
             "temperature": 0,
         }
