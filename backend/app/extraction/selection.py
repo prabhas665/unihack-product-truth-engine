@@ -17,7 +17,7 @@ touches the network, and never changes attribute values.
 
 Policy
 -----
-PRIMARY   : the requested MPN appears (exact, case-insensitive) in the
+PRIMARY   : the requested MPN appears (exact token, case-insensitive) in the
             record URL or title -> strongest relevance.
 SECONDARY : the requested MPN appears only in the record text, or the record
             carries no other product identity at all (a generic manufacturer
@@ -25,6 +25,13 @@ SECONDARY : the requested MPN appears only in the record text, or the record
 EXCLUDE   : the record clearly names a DIFFERENT product (a sibling MPN token
             appears in the URL slug or title) and never references the
             requested MPN -> drop it.
+
+Tokens are product-like (hyphen-aware: ``XLC10ZW-2`` and ``49-94-0013`` are
+single tokens) and must contain a digit. Siblinghood is decided at token
+boundaries: ``XLC10ZW-2`` never matches a request for ``XLC10ZW``, and a
+sibling MPN that appears ONLY in the URL slug is still excluded. When the
+request carries no usable MPN, nothing can be judged a sibling, so every
+record is kept.
 
 Budget
 ------
@@ -47,17 +54,20 @@ from dataclasses import dataclass, field
 from app.core.domain import ProductIdentity
 from app.sources.retrieval import EvidenceRecord
 
-# A product-like token: >=4 chars of A-Z0-9 containing at least one digit.
-_MPN_TOKEN_RE = re.compile(r"[A-Z0-9]{4,}")
+# A product-like token: one or more A-Z0-9 groups joined by hyphens (so
+# hyphenated part numbers like XLC10ZW-2 or 49-94-0013 stay one token),
+# at least 4 characters, containing at least one digit (this keeps short
+# spec values like "18V" from looking like product identities).
+_MPN_TOKEN_RE = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*")
 _DIGIT_RE = re.compile(r"\d")
 
 
 def _mpn_tokens(value: str) -> set[str]:
-    """Uppercased product-like tokens (contain a digit) from a string."""
+    """Uppercased product-like tokens (>=4 chars, contain a digit)."""
     return {
         token
         for token in _MPN_TOKEN_RE.findall((value or "").upper())
-        if _DIGIT_RE.search(token)
+        if len(token) >= 4 and _DIGIT_RE.search(token)
     }
 
 
@@ -91,29 +101,33 @@ def select_extraction_evidence(
     record (sibling exclusion or budget overflow).
     """
     requested = (identity.mpn or "").strip().upper()
+    requested_tokens = _mpn_tokens(requested)
 
     def classify(record: EvidenceRecord) -> tuple[int, str]:
         """Return (rank, kind). rank 0=PRIMARY,1=SECONDARY,2=SIBLING."""
         url = record.url or ""
         title = record.title or ""
         text = record.text or ""
-        url_u = url.upper()
-        title_u = title.upper()
-        text_u = text.upper()
-        has_requested = bool(requested) and (
-            requested in url_u or requested in title_u or requested in text_u
+        record_tokens = (
+            _mpn_tokens(url) | _mpn_tokens(title) | _mpn_tokens(text)
         )
-        if has_requested:
-            primary = requested in url_u or requested in title_u
+        if not requested_tokens:
+            # No usable MPN identity for the request: nothing can be judged
+            # a sibling, so every record is kept (secondary) rather than
+            # dropped for naming *some* product.
+            return (1, "secondary")
+        exact = requested_tokens & record_tokens
+        if exact:
+            primary = bool(_mpn_tokens(url) & requested_tokens) or bool(
+                _mpn_tokens(title) & requested_tokens
+            )
             return (0 if primary else 1, "primary" if primary else "secondary")
 
-        # No reference to the requested MPN: is this clearly a different product?
-        # Match on the title/text only (not the URL slug): a real manufacturer
-        # sibling page names its own MPN in its title/body, while a generic
-        # page (or a fixture using a shared page) carries no foreign MPN there.
-        sibling_tokens = _mpn_tokens(title) | _mpn_tokens(text)
-        if requested:
-            sibling_tokens.discard(requested)
+        # No reference to the requested MPN: is this clearly a different
+        # product? A real manufacturer sibling page names its own MPN token
+        # in its URL slug, title, or body, while a generic page carries no
+        # foreign product token there.
+        sibling_tokens = record_tokens - requested_tokens
         if sibling_tokens:
             return (2, "sibling:" + ",".join(sorted(sibling_tokens)))
         return (1, "secondary")

@@ -107,6 +107,7 @@ from app.validation.types import (
 # description fields are left blank (never fabricated) and the stage is marked
 # NEEDS_REVIEW rather than FAILED so the rest of the result survives.
 DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter timeout."
+EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
 
 
 class StageName(str, Enum):
@@ -595,7 +596,7 @@ class EnrichmentService:
             for reason in selection.dropped:
                 review_reasons.append(reason)
             mark(StageName.EXTRACTION, StageStatus.RUNNING)
-            extraction, extraction_note, extraction_reasons = (
+            extraction, extraction_note, extraction_reasons, extraction_hint = (
                 self._extract(
                     discovery.product,
                     input_row,
@@ -624,12 +625,18 @@ class EnrichmentService:
                                 f"{message.code}: {message.message}"
                             )
             else:
-                mark(
-                    StageName.EXTRACTION,
-                    StageStatus.SKIPPED if extraction_note.startswith("skipped")
-                    else StageStatus.FAILED,
-                    extraction_note,
-                )
+                # A hint can arrive even without an extraction response (e.g.
+                # the LLM timed out): honor it so the timeout is non-fatal
+                # and the stage becomes NEEDS_REVIEW instead of FAILED.
+                if extraction_hint is not None:
+                    mark(StageName.EXTRACTION, extraction_hint, extraction_note)
+                else:
+                    mark(
+                        StageName.EXTRACTION,
+                        StageStatus.SKIPPED if extraction_note.startswith("skipped")
+                        else StageStatus.FAILED,
+                        extraction_note,
+                    )
                 mark(StageName.VALIDATION, StageStatus.RUNNING)
                 mark(
                     StageName.VALIDATION,
@@ -824,11 +831,15 @@ class EnrichmentService:
         input_row: UniHackInputRow,
         usable: list[EvidenceRecord],
         review_reasons: list[str],
-    ) -> tuple[ExtractionResponse | None, str, list[str]]:
-        """Run AI extraction; returns (response, note, extra review reasons).
+    ) -> tuple[ExtractionResponse | None, str, list[str], StageStatus | None]:
+        """Run AI extraction; returns (response, note, reasons, status_hint).
 
-        Missing LLM configuration and provider/validation failures turn into
-        a FAILED stage with a review reason - never an exception.
+        Missing LLM configuration and non-timeout provider/validation
+        failures turn into a FAILED stage with a review reason - never an
+        exception. A hard LLM timeout is different: the pipeline already
+        completed discovery and retrieval, so the run survives with the
+        extraction stage marked NEEDS_REVIEW (evidence and delivery are
+        preserved, and nothing is fabricated).
         """
         reasons: list[str] = []
         if not usable:
@@ -837,7 +848,7 @@ class EnrichmentService:
                 "extraction skipped: no successfully retrieved evidence "
                 "with extractable text"
             )
-            return None, note, reasons
+            return None, note, reasons, None
 
         client = self._llm_client
         if client is None:
@@ -846,7 +857,7 @@ class EnrichmentService:
             except LLMConfigurationError as exc:
                 note = f"failed: LLM not configured ({exc})"
                 reasons.append(f"extraction failed: {exc}")
-                return None, note, reasons
+                return None, note, reasons, None
 
         service = ExtractionService(client)
         try:
@@ -860,7 +871,14 @@ class EnrichmentService:
         except ExtractionError as exc:
             note = f"failed ({exc.kind.value}): {exc.message}"
             reasons.append(f"extraction failed ({exc.kind.value}): {exc.message}")
-            return None, note, reasons
+            if isinstance(exc.__cause__, LLMTimeoutError):
+                # Hard wall-clock timeout: never fabricate attributes and
+                # never lose the run - mark the stage NEEDS_REVIEW so the
+                # evidence, validation, and 252-column delivery survive.
+                note = EXTRACTION_TIMEOUT_REASON
+                reasons.append(EXTRACTION_TIMEOUT_REASON)
+                return None, note, reasons, StageStatus.NEEDS_REVIEW
+            return None, note, reasons, None
 
         for rejected in response.rejected:
             reasons.append(
@@ -870,7 +888,7 @@ class EnrichmentService:
             f"{len(response.attributes)} accepted, "
             f"{len(response.rejected)} rejected"
         )
-        return response, note, reasons
+        return response, note, reasons, None
 
     def _generate_descriptions(
         self,

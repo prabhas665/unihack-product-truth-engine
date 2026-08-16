@@ -606,3 +606,101 @@ class TestMfrUrlMpnRelevance:
         refs = _ref_urls(row, schema)
         assert refs[0] == compatible.source_url
         assert refs[1:] == [""] * 4
+
+
+class TestMfrUrlTokenBoundaries:
+    """Delivery URL relevance is decided at MPN token boundaries (P0).
+
+    The audit found the substring relevance check too strict (it would blank
+    the WDTS7024RZ manufacturer URL, whose slug truncates the MPN) and too
+    loose at the same time (XLC10ZW-2 or XLC10ZWX could match XLC10ZW).
+    Relevance now operates on hyphen-aware product tokens:
+    - exact token (49-94-0013) is the strongest match;
+    - a page token that is a strict PREFIX of the MPN (WDTS7024R for
+      WDTS7024RZ) is accepted for the manufacturer URL;
+    - a strict EXTENSION (XLC10ZW-2) or a different MPN (XLC10R1W) is a
+      sibling and is never cited.
+    """
+
+    WHIRLPOOL_PREFIX = (
+        "https://learnwhirlpool.com/smartsearchresults?searchtext=WDTS7024R"
+    )
+    MILWAUKEE_4940013 = "https://www.milwaukeetool.com/products/49-94-0013"
+
+    def test_kit_extension_variant_never_cited_for_base_mpn(self):
+        exact = _evidence(
+            "e-exact",
+            "https://makitatools.com/products/details/XLC10ZW",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+        )
+        kit = _evidence(
+            "e-kit",
+            "https://makitatools.com/products/details/XLC10ZW-2",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="XLC10ZW-2 kit with charger",
+        )
+        row = mapper.map(_product("XLC10ZW", [exact, kit]))
+
+        assert (
+            row.values[schema.index_of("MFR URL")]
+            == "https://makitatools.com/products/details/XLC10ZW"
+        )
+        refs = _ref_urls(row, schema)
+        assert kit.source_url not in refs
+        assert refs == [""] * 5
+
+    def test_prefix_slug_without_full_mpn_is_mfr_url(self):
+        """WDTS7024RZ's official manufacturer URL truncates the MPN in the
+        search slug (searchtext=WDTS7024R): it must still be cited."""
+        page = _evidence(
+            "e-whirlpool",
+            self.WHIRLPOOL_PREFIX,
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="Whirlpool Smart Search Results",
+        )
+        row = mapper.map(_product("WDTS7024RZ", [page]))
+
+        assert row.values[schema.index_of("MFR URL")] == self.WHIRLPOOL_PREFIX
+
+    def test_hyphenated_mpn_exact_url_is_mfr_url(self):
+        page = _evidence(
+            "e-milwaukee",
+            self.MILWAUKEE_4940013,
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+        )
+        row = mapper.map(_product("49-94-0013", [page]))
+
+        assert row.values[schema.index_of("MFR URL")] == self.MILWAUKEE_4940013
+
+    def test_soft_slug_is_mfr_url_and_extended_variant_still_excluded(self):
+        exact = _evidence(
+            "e-exact",
+            self.WHIRLPOOL_PREFIX,
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="WDTS7024RZ results",
+        )
+        extended = _evidence(
+            "e-ext",
+            "https://learnwhirlpool.com/smartsearchresults?searchtext=WDTS7024RZ1",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="WDTS7024RZ1 deluxe model",
+        )
+        row = mapper.map(_product("WDTS7024RZ", [exact, extended]))
+
+        assert row.values[schema.index_of("MFR URL")] == self.WHIRLPOOL_PREFIX
+        refs = _ref_urls(row, schema)
+        assert extended.source_url not in refs
+        assert refs == [""] * 5
+
+    def test_lookalike_extension_never_satisfies_request(self):
+        """XLC10ZWX is a different token; only the exact page may be cited."""
+        lookalike = _evidence(
+            "e-lookalike",
+            "https://makitatools.com/products/details/XLC10ZWX",
+            SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="XLC10ZWX",
+        )
+        row = mapper.map(_product("XLC10ZW", [lookalike]))
+
+        assert row.values[schema.index_of("MFR URL")] == ""
+        assert _ref_urls(row, schema) == [""] * 5

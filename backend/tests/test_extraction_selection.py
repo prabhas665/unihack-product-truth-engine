@@ -176,3 +176,119 @@ def test_primary_outranks_text_only_secondary():
         "ev-primary",
         "ev-secondary",
     ]
+
+
+def test_empty_mpn_keeps_every_record():
+    """No usable MPN identity means nothing can be judged a sibling.
+
+    Regression: an empty MPN previously inverted the sibling logic and
+    dropped every record that carried any product token.
+    """
+    records = [
+        _record(
+            "ev-a",
+            "https://makita.example/XLC10ZW",
+            "XLC10ZW",
+            "XLC10ZW 18V tool.",
+        ),
+        _record(
+            "ev-b",
+            "https://makita.example/XLC10R1W",
+            "XLC10R1W",
+            "XLC10R1W 18V tool.",
+        ),
+    ]
+    result = select_extraction_evidence(
+        ProductIdentity(mpn="", manufacturer="Makela", brand="Makita"),
+        records,
+        budget_chars=12_000,
+    )
+    assert {r.evidence_id for r in result.selected} == {"ev-a", "ev-b"}
+    assert result.dropped == []
+
+
+def test_hyphenated_kit_variant_is_a_sibling_not_a_match():
+    """XLC10ZW-2 is a DIFFERENT product token, never a match for XLC10ZW."""
+    exact = _record(
+        "ev-xlc10zw",
+        "https://makitatools.com/products/details/XLC10ZW",
+        "XLC10ZW",
+        "XLC10ZW Makita 18V tool.",
+    )
+    kit = _record(
+        "ev-kit",
+        "https://makitatools.com/products/details/XLC10ZW-2",
+        "XLC10ZW-2",
+        "XLC10ZW-2 kit with charger.",
+    )
+    result = select_extraction_evidence(
+        _xlc10zw_request(), [exact, kit], budget_chars=12_000
+    )
+    assert [r.evidence_id for r in result.selected] == ["ev-xlc10zw"]
+    assert any("ev-kit" in reason for reason in result.dropped)
+
+
+def test_substring_lookalike_is_not_a_match():
+    """A longer token (XLC10ZWX) never satisfies a request for XLC10ZW.
+
+    Regression: the old substring check treated XLC10ZWX as a mention of
+    XLC10ZW and promoted the wrong page.
+    """
+    exact = _record(
+        "ev-xlc10zw",
+        "https://makitatools.com/products/details/XLC10ZW",
+        "XLC10ZW",
+        "XLC10ZW Makita 18V tool.",
+    )
+    lookalike = _record(
+        "ev-zwx",
+        "https://makitatools.com/products/details/XLC10ZWX",
+        "XLC10ZWX",
+        "XLC10ZWX is a different Makita model.",
+    )
+    result = select_extraction_evidence(
+        _xlc10zw_request(), [exact, lookalike], budget_chars=12_000
+    )
+    assert [r.evidence_id for r in result.selected] == ["ev-xlc10zw"]
+    assert any("ev-zwx" in reason for reason in result.dropped)
+
+
+def test_sibling_mpn_only_in_url_slug_is_excluded():
+    """The URL slug is scanned: a sibling named only in the slug is dropped.
+
+    Regression: siblinghood was decided on title/text alone, so a page whose
+    slug names a foreign MPN but whose title/body carry no token leaked in.
+    """
+    exact = _record(
+        "ev-xlc10zw",
+        "https://makitatools.com/products/details/XLC10ZW",
+        "XLC10ZW",
+        "XLC10ZW Makita 18V tool.",
+    )
+    slug_sibling = _record(
+        "ev-slug",
+        "https://makitatools.com/products/details/XLC08ZB",
+        "Cordless vacuum",
+        "Cordless stick vacuum for home use.",
+    )
+    result = select_extraction_evidence(
+        _xlc10zw_request(), [exact, slug_sibling], budget_chars=12_000
+    )
+    assert [r.evidence_id for r in result.selected] == ["ev-xlc10zw"]
+    assert any("ev-slug" in reason for reason in result.dropped)
+
+
+def test_hyphenated_mpn_kept_as_one_token():
+    """49-94-0013 is one token and matches its exact product page."""
+    identity = ProductIdentity(
+        mpn="49-94-0013", manufacturer="Milwaukee", brand="Milwaukee"
+    )
+    exact = _record(
+        "ev-m18",
+        "https://www.milwaukeetool.com/products/49-94-0013",
+        "49-94-0013",
+        "49-94-0013 Milwaukee tool.",
+    )
+    result = select_extraction_evidence(identity, [exact], budget_chars=12_000)
+    assert [r.evidence_id for r in result.selected] == ["ev-m18"]
+    assert result.dropped == []

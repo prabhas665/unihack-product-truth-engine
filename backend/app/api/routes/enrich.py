@@ -28,6 +28,7 @@ Step 10B changes:
 from __future__ import annotations
 
 import json
+import re
 import traceback
 import uuid
 
@@ -44,6 +45,7 @@ from app.db.repository import (
     build_enrichment_from_payload,
     normalize_mpn,
 )
+from app.identity.mapping import is_placeholder
 from app.pipeline.enrichment import (
     EnrichmentRequest,
     EnrichmentResult,
@@ -56,6 +58,71 @@ from app.sources.discovery import SourceProvider
 from app.sources.providers.manual_url import ManualUrlProvider
 
 router = APIRouter(prefix="/api", tags=["enrich"])
+
+# Corporate name noise filtered out when comparing manufacturer contexts.
+_MANUFACTURER_STOP_WORDS = {
+    "AND",
+    "CO",
+    "COMPANY",
+    "COMPANIES",
+    "CORP",
+    "CORPORATION",
+    "DIVISION",
+    "ELECTRIC",
+    "GROUP",
+    "INC",
+    "INDUSTRIAL",
+    "INDUSTRIES",
+    "LTD",
+    "LLC",
+    "MACHINE",
+    "MACHINES",
+    "MACHINERY",
+    "OF",
+    "PRODUCTS",
+    "SERVICES",
+    "THE",
+    "TOOL",
+    "TOOLS",
+    "USA",
+    "WORKS",
+}
+
+
+def _manufacturer_tokens(value: str) -> set[str]:
+    """Uppercased, de-noised manufacturer name tokens from a string.
+
+    Parenthetical codes are stripped ("Freud Inc (2435)" -> FREUD, INC) and
+    generic corporate words removed, so "Makita Usa Inc" and "Makita"
+    compare equal. Pure-numeric tokens (manufacturer codes) are dropped.
+    """
+    raw = set(re.findall(r"[A-Z0-9]+", (value or "").upper()))
+    return {
+        token
+        for token in raw
+        if len(token) >= 2
+        and not token.isdigit()
+        and token not in _MANUFACTURER_STOP_WORDS
+    }
+
+
+def _manufacturers_compatible(
+    requested_part_manuf: str, stored_manufacturer: str
+) -> bool:
+    """True when the request's Part_Manuf matches the stored manufacturer.
+
+    Conservative cache isolation: a stored record is served only when the
+    request does not clearly belong to a DIFFERENT manufacturer. Blank,
+    placeholder, or unknown names on either side cannot prove a mismatch, so
+    they never reject (legacy records without a manufacturer stay servable).
+    """
+    if is_placeholder(requested_part_manuf) or is_placeholder(stored_manufacturer):
+        return True
+    requested_tokens = _manufacturer_tokens(requested_part_manuf)
+    stored_tokens = _manufacturer_tokens(stored_manufacturer)
+    if not requested_tokens or not stored_tokens:
+        return True
+    return bool(requested_tokens & stored_tokens)
 
 
 def build_manual_source(
@@ -138,6 +205,19 @@ def enrich(
                     rebuilt = None
                 elif rebuilt is not None:
                     require_enrichment_identity(rebuilt, mpn)
+                    # Cache isolation: a fresh MPN record may belong to a
+                    # DIFFERENT manufacturer (MPNs are not globally unique).
+                    # When the request clearly names another manufacturer,
+                    # the stored result is rejected and the pipeline runs.
+                    stored_manufacturer = (
+                        rebuilt.product.identity.manufacturer
+                        if rebuilt.product is not None
+                        else ""
+                    )
+                    if not _manufacturers_compatible(
+                        request.Part_Manuf, stored_manufacturer
+                    ):
+                        rebuilt = None
             except (ValueError, TypeError, IdentityInvariantError):
                 rebuilt = None
             if rebuilt is not None:

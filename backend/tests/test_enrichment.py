@@ -461,8 +461,13 @@ class TestWallClockTimeout:
         extraction = next(
             s for s in result.stages if s.stage == StageName.EXTRACTION
         )
-        assert extraction.status == StageStatus.FAILED
-        assert result.processing.status == ProcessingStatus.FAILED
+        # A wall-clock timeout is non-fatal: the stage becomes NEEDS_REVIEW
+        # and the evidence + delivery survive (P0 fix).
+        assert extraction.status == StageStatus.NEEDS_REVIEW
+        assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
+        assert result.product is not None
+        assert result.product.attributes == {}
+        assert result.delivery.column_count == 252
 
 
 class TestSparseAndFailedRuns:
@@ -596,6 +601,61 @@ class TestExtractionFailureModes:
         assert any("No LLM provider configured" in r for r in result.review_reasons)
         assert result.processing.status == ProcessingStatus.FAILED
         assert result.delivery.column_count == 252
+
+    def test_extraction_timeout_is_needs_review_not_failed(self):
+        # A hard wall-clock timeout during extraction must NOT fail the whole
+        # run: discovery and retrieval already succeeded, so the evidence,
+        # product intelligence, and 252-column delivery survive for review.
+        result = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=FakeLLMClient(
+                error=LLMTimeoutError("openrouter: wall-clock timeout after 60s")
+            ),
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[StageName.EXTRACTION] == StageStatus.NEEDS_REVIEW
+        assert statuses[StageName.VALIDATION] == StageStatus.SKIPPED
+        assert statuses[StageName.DESCRIPTION] == StageStatus.SKIPPED
+        assert statuses[StageName.PRODUCT_INTELLIGENCE] == StageStatus.COMPLETED
+        assert statuses[StageName.DELIVERY] == StageStatus.COMPLETED
+        # The timeout must NOT fail the whole run.
+        assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
+        assert result.processing.status != ProcessingStatus.FAILED
+        # Clear, exact review reason.
+        assert any(
+            r == "Extraction unavailable: LLM call timed out."
+            for r in result.review_reasons
+        )
+        # Nothing was extracted, nothing fabricated.
+        assert result.extraction is None
+        assert result.product is not None
+        assert result.product.attributes == {}
+        # Retrieved evidence is preserved intact.
+        assert len(result.product.evidence) == 2
+        # 252-column delivery still produced; attribute slots blank.
+        schema = delivery_schema()
+        assert result.delivery.column_count == 252
+        assert result.delivery.values[column(schema, "Mfg_Part_Num")] == (
+            "DCB518ASTS06G"
+        )
+        assert result.delivery.values[column(schema, "ATTRIBUTE_LABEL 1")] == ""
+
+    def test_extraction_non_timeout_failure_stays_fatal(self):
+        # A non-timeout LLM error (provider unavailable) must still fail the
+        # run, proving only timeouts became non-fatal.
+        result = make_service(
+            provider=acme_provider(),
+            records=acme_evidence(),
+            llm=FakeLLMClient(
+                error=LLMProviderUnavailableError("boom: provider exploded")
+            ),
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[StageName.EXTRACTION] == StageStatus.FAILED
+        assert result.processing.status == ProcessingStatus.FAILED
 
     def test_dangling_evidence_reference_rejected(self):
         output = ExtractionOutput(

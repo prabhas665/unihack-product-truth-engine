@@ -14,6 +14,10 @@ Rules:
 - URLs/assets come exclusively from recorded evidence. Nothing is invented.
 """
 
+from __future__ import annotations
+
+import re
+
 from app.core.domain.enums import SourceType
 from app.core.domain.evidence import Evidence
 from app.core.domain.product import ProductIntelligence
@@ -26,10 +30,62 @@ from app.unihack.schema import (
 NOTE_ENRICHMENT = "requires enrichment/verification"
 NOTE_TAXONOMY = "requires classification from the official UniHack taxonomy"
 
+# A product-like token: one or more A-Z0-9 groups joined by hyphens (so
+# hyphenated part numbers like XLC10ZW-2 or 49-94-0013 stay one token),
+# at least 4 characters, containing at least one digit (this keeps short
+# spec values like "18V" from looking like product identities).
+_MPN_TOKEN_RE = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*")
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _mpn_tokens(value: str) -> set[str]:
+    """Uppercased product-like tokens (>=4 chars, contain a digit)."""
+    return {
+        token
+        for token in _MPN_TOKEN_RE.findall((value or "").upper())
+        if len(token) >= 4 and _DIGIT_RE.search(token)
+    }
+
 
 def _canonical_mpn(mpn: str | None) -> str:
     """One canonical MPN representation for delivery relevance checks."""
     return (mpn or "").strip().upper()
+
+
+def _match_kind(
+    evidence: "Evidence", requested: str, *, url_only: bool = False
+) -> str:
+    """How an evidence record's url (and optionally title) relate to the MPN.
+
+    exact   : the full MPN appears as a token (e.g. ``49-94-0013``).
+    soft    : a token is a strict PREFIX of the MPN; manufacturers truncate
+              MPNs in search slugs (e.g. ``WDTS7024R`` for ``WDTS7024RZ``).
+    sibling : a token is a strict EXTENSION of the MPN (``XLC10ZW-2`` for
+              ``XLC10ZW``) or a different product token (``XLC10R1W``).
+    none    : no product-like token in the inspected fields at all.
+
+    ``url_only`` restricts the check to the URL slug, which is the
+    authoritative statement of which product a page describes: a sibling
+    page (URL slug ``XLC10R1W``) whose TITLE merely mentions the requested
+    MPN must never be selected as the requested product's manufacturer page.
+    """
+    requested = _canonical_mpn(requested)
+    source = (
+        evidence.source_url
+        if url_only
+        else f"{evidence.source_url} {evidence.source_title}"
+    )
+    tokens = _mpn_tokens(source)
+    if not requested or not tokens:
+        return "none"
+    if requested in tokens:
+        return "exact"
+    if any(
+        requested.startswith(token) and token != requested
+        for token in tokens
+    ):
+        return "soft"
+    return "sibling"
 
 
 def _references_mpn(evidence: "Evidence", mpn: str) -> bool:
@@ -37,13 +93,14 @@ def _references_mpn(evidence: "Evidence", mpn: str) -> bool:
 
     Delivery citations must point at evidence for the REQUESTED product, not
     at sibling manufacturer pages that merely share the manufacturer domain.
-    The domain Evidence model only carries url/title (snippet is not
-    populated), so relevance is checked on those two fields.
+    Relevance is token-aware at exact/soft level: ``XLC10ZW-2`` and
+    ``XLC10R1W`` never satisfy a request for ``XLC10ZW``, while a page whose
+    slug is a strict prefix of the requested MPN (``WDTS7024R`` for
+    ``WDTS7024RZ``) is accepted.
     """
     if not mpn:
         return True
-    key = f"{evidence.source_url} {evidence.source_title}".upper()
-    return mpn in key
+    return _match_kind(evidence, mpn) in ("exact", "soft")
 
 
 class UniHackDeliveryMapper:
@@ -132,32 +189,38 @@ class UniHackDeliveryMapper:
             return
 
         # MPN-aware delivery traceability: only evidence that references the
-        # requested MPN may become a citation. MFR URL must be the exact
-        # requested-MPN manufacturer product page (never a sibling); Ref URLs
-        # contain only relevant evidence, with unused cells left blank.
-        exact_page = next(
-            (
-                e
-                for e in evidence
-                if e.source_type == SourceType.MANUFACTURER_PRODUCT_PAGE
-                and requested in (e.source_url or "").upper()
-            ),
-            None,
-        )
-        if exact_page is not None:
-            self._set(row, "MFR URL", exact_page.source_url)
-            relevant = [
-                e
-                for e in evidence
-                if e.id != exact_page.id and _references_mpn(e, requested)
-            ]
-        else:
-            # No exact-MPN manufacturer page was retrieved; never cite a
-            # sibling page as the manufacturer URL.
-            self._set(row, "MFR URL", "")
-            relevant = [
-                e for e in evidence if _references_mpn(e, requested)
-            ]
+        # requested MPN may become a citation. MFR URL must be a
+        # manufacturer product page for the requested product: an exact MPN
+        # match, else a page whose slug is a strict prefix of the MPN (e.g.
+        # WDTS7024R for WDTS7024RZ). A page that names a DIFFERENT MPN
+        # (sibling/extension such as XLC10ZW-2) is never cited as the
+        # manufacturer URL, and no URL is ever invented. Ref URLs contain
+        # only relevant (exact/soft) evidence, with unused cells left blank.
+        product_pages = [
+            e
+            for e in evidence
+            if e.source_type == SourceType.MANUFACTURER_PRODUCT_PAGE
+        ]
+        mfr_page: Evidence | None = None
+        for kind in ("exact", "soft"):
+            if mfr_page is not None:
+                break
+            mfr_page = next(
+                (
+                    e
+                    for e in product_pages
+                    if _match_kind(e, requested, url_only=True) == kind
+                ),
+                None,
+            )
+        if mfr_page is not None:
+            self._set(row, "MFR URL", mfr_page.source_url)
+        relevant = [
+            e
+            for e in evidence
+            if e.id != (mfr_page.id if mfr_page is not None else None)
+            and _references_mpn(e, requested)
+        ]
         for offset, evidence_item in enumerate(
             sorted(relevant, key=lambda e: e.id)[:5]
         ):

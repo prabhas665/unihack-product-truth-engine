@@ -225,6 +225,49 @@ def _default_delivery():
     )
 
 
+def _make_result_for(mpn: str, part_manuf: str, manufacturer: str):
+    """Build a minimal valid EnrichmentResult for a specific product."""
+    from app.core.domain import ProductIdentity, ProductIntelligence
+    from app.pipeline.enrichment import (
+        DeliveryRowView,
+        StageName,
+        StageState,
+        StageStatus,
+    )
+    from app.sources.discovery import DiscoveryResult
+
+    req = default_request(Mfg_Part_Num=mpn, Part_Manuf=part_manuf)
+    input_row = InputRowView.from_row(req.to_input_row())
+    processing = ProcessingMetadata(
+        status=ProcessingStatus.COMPLETED,
+        created_at=datetime.utcnow().isoformat(),
+        updated_at=datetime.utcnow().isoformat(),
+    )
+    stages = [StageState(stage=s, status=StageStatus.COMPLETED) for s in StageName]
+    discovery = DiscoveryResult(
+        product=ProductIdentity(
+            manufacturer=manufacturer,
+            brand=manufacturer,
+            mpn=mpn,
+        )
+    )
+    return EnrichmentResult(
+        request=req,
+        input_row=input_row,
+        processing=processing,
+        stages=stages,
+        discovery=discovery,
+        product=ProductIntelligence(identity=discovery.product, processing=processing),
+        delivery=DeliveryRowView(
+            headers=["Mfg_Part_Num", "PART_NUMBER"],
+            values=[mpn, mpn],
+            notes=[],
+            column_count=2,
+        ),
+        quality=_default_quality(),
+    )
+
+
 def _default_quality():
     from app.core.domain import QualityScore, ConfidenceSummary
     return QualityScore(
@@ -698,6 +741,92 @@ class TestEnrichRetrieveFromDb:
             app.dependency_overrides.pop(get_enrichment_service, None)
 
         assert resp.status_code == 200
+        assert call_tracker["run_called"]
+
+    def test_same_manufacturer_served_from_db(self, db_engine, session_factory):
+        """A fresh record whose manufacturer matches the request is served."""
+        seed = session_factory()
+        try:
+            repo = ProductRepository()
+            result = _make_result_for(
+                "49-94-0013",
+                "Milwaukee Electric Tool Corp (2300)",
+                "Milwaukee",
+            )
+            job = Job(kind="enrich", status="completed")
+            seed.add(job)
+            seed.flush()
+            repo.save_enrichment(seed, result, job_id=job.id, run_id="r1")
+            seed.commit()
+        finally:
+            seed.close()
+
+        self._override_all(db_engine, session_factory)
+        try:
+            resp = TestClient(app).post(
+                "/api/enrich",
+                json=default_request(
+                    Mfg_Part_Num="49-94-0013",
+                    Part_Manuf="Milwaukee Electric Tool Corp (2300)",
+                ).model_dump(),
+                params={"retrieve_from_db": True},
+            )
+        finally:
+            app.dependency_overrides.pop(get_enrichment_service, None)
+
+        assert resp.status_code == 200
+        assert resp.headers.get("x-source") == "database"
+
+    def test_different_manufacturer_never_served_from_db(
+        self, db_engine, session_factory
+    ):
+        """MPNs are not globally unique: a Milwaukee record must not be
+        returned for a Craftsman request that shares the MPN. Regression:
+        the DB-first path was keyed on MPN alone, so a cross-manufacturer
+        request could be served a fresh record for the WRONG product."""
+        seed = session_factory()
+        try:
+            repo = ProductRepository()
+            result = _make_result_for(
+                "49-94-0013",
+                "Milwaukee Electric Tool Corp (2300)",
+                "Milwaukee",
+            )
+            job = Job(kind="enrich", status="completed")
+            seed.add(job)
+            seed.flush()
+            repo.save_enrichment(seed, result, job_id=job.id, run_id="r1")
+            seed.commit()
+        finally:
+            seed.close()
+
+        call_tracker = {"run_called": False}
+        real_svc = fake_service()
+
+        class SpyService(EnrichmentService):
+            def run(self, req):
+                call_tracker["run_called"] = True
+                return real_svc.run(req)
+
+        self._override_all(
+            db_engine,
+            session_factory,
+            service=SpyService(providers=[], manufacturer_domains=[]),
+        )
+        try:
+            resp = TestClient(app).post(
+                "/api/enrich",
+                json=default_request(
+                    Mfg_Part_Num="49-94-0013",
+                    Part_Manuf="Craftsman (9192)",
+                ).model_dump(),
+                params={"retrieve_from_db": True},
+            )
+        finally:
+            app.dependency_overrides.pop(get_enrichment_service, None)
+
+        assert resp.status_code == 200
+        assert resp.headers.get("x-source") != "database"
         assert call_tracker["run_called"]
 
 
