@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # Evidence retrieval limits (see app/sources/retrieval/limits.py).
     retrieval_timeout_seconds: float = 20.0
     retrieval_max_bytes: int = 5_000_000  # HTML responses
-    retrieval_max_pdf_bytes: int = 10_000_000
+    retrieval_max_pdf_bytes: int = 25_000_000
     retrieval_user_agent: str = "ProductTruthEngine/0.1 (hackathon)"
     # Cap on extracted-readable-text per evidence record (characters), applied
     # AFTER HTML/PDF text extraction so the stored evidence text stays bounded

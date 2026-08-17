@@ -15,7 +15,7 @@ from app.config import settings
 class RetrievalLimits(BaseModel):
     timeout_seconds: float = Field(default=20.0, gt=0)
     max_bytes: int = Field(default=5_000_000, gt=0)  # HTML responses
-    max_pdf_bytes: int = Field(default=10_000_000, gt=0)
+    max_pdf_bytes: int = Field(default=25_000_000, gt=0)
     user_agent: str = "ProductTruthEngine/0.1 (hackathon)"
     # Cap on extracted-readable-text per record (characters), applied AFTER
     # HTML/PDF extraction. None disables the cap.

@@ -408,3 +408,147 @@ class TestTextCharCap:
         assert result.retrieval_status == RetrievalStatus.SUCCESS
         assert "truncated" in result.text
         assert len(result.text) <= 200 + len(TRUNCATION_MARKER) + 20
+
+
+def _build_multipage_pdf(page_count: int, page_text_chars: int) -> bytes:
+    """Build a valid PDF with ``page_count`` identical small-text pages."""
+    page_text = "A" * page_text_chars
+    content = f"BT /F1 12 Tf 20 760 Td ({page_text}) Tj ET"
+    content_obj = f"<< /Length {len(content)} >>\nstream\n{content}\nendstream"
+    page_obj = (
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        "/Contents {c} 0 R /Resources << /Font << /F1 3 0 R >> >> >>"
+    )
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(page_count))
+    catalog = b"<< /Type /Catalog /Pages 2 0 R >>"
+    pages = f"<< /Type /Pages /Kids [{kids}] /Count {page_count} >>".encode()
+    font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    body = bytearray(b"%PDF-1.4\n")
+    offsets = [0, len(b"%PDF-1.4\n")]
+    body += b"1 0 obj\n" + catalog + b"\nendobj\n"
+    offsets.append(len(body))
+    body += b"2 0 obj\n" + pages + b"\nendobj\n"
+    offsets.append(len(body))
+    body += b"3 0 obj\n" + font + b"\nendobj\n"
+    for index in range(page_count):
+        offsets.append(len(body))
+        body += f"{4 + 2 * index} 0 obj\n".encode() + \
+            page_obj.format(c=5 + 2 * index).encode() + b"\nendobj\n"
+        offsets.append(len(body))
+        body += f"{5 + 2 * index} 0 obj\n".encode() + \
+            content_obj.encode() + b"\nendobj\n"
+    xref_pos = len(body)
+    body += f"xref\n0 {len(offsets)}\n".encode()
+    body += b"0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        body += f"{offset:010d} 00000 n \n".encode()
+    body += (
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF"
+    ).encode()
+    return bytes(body)
+
+
+def make_large_pdf_bytes(target_size: int) -> bytes:
+    """Build a valid PDF of essentially exactly ``target_size`` bytes.
+
+    A modest number of small text pages keeps pypdf extraction fast, while a
+    large /Metadata stream object (never touched by text extraction) supplies
+    the bulk of the bytes - so a ~25 MB boundary test stays practical.
+    """
+    page_count = 30
+    page_text_chars = 8_000
+    base = _build_multipage_pdf(page_count, page_text_chars)
+    obj_id = 4 + 2 * page_count
+
+    def with_filler(size: int) -> bytes:
+        obj = (
+            f"{obj_id} 0 obj\n<< /Length {size} /Type /Metadata >>\n"
+            f"stream\n".encode()
+            + b"A" * size
+            + b"\nendstream\nendobj\n"
+        )
+        return base + obj
+
+    filler = max(0, target_size - len(base) - 64)
+    body = with_filler(filler)
+    delta = target_size - len(body)
+    if delta:
+        body = with_filler(filler + delta)
+    return body
+
+
+class TestPdfSizeCapSettings:
+    """P0 fix: PDF retrieval cap raised from 10 MB to 25 MB (config-level)."""
+
+    def test_settings_default_pdf_cap_is_25mb(self):
+        limits = retrieval_limits_from_settings()
+        assert limits.max_pdf_bytes == 25_000_000
+
+    def test_settings_html_cap_unchanged_at_5mb(self):
+        limits = retrieval_limits_from_settings()
+        assert limits.max_bytes == 5_000_000
+
+    def test_pdf_just_below_25mb_succeeds(self):
+        body = make_large_pdf_bytes(25_000_000 - 10_000)
+        assert len(body) < 25_000_000
+        assert len(body) > 25_000_000 - 20_000
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=body, headers={"content-type": "application/pdf"}
+            )
+
+        result = retrieve_candidate(
+            make_candidate(
+                url="https://acme-controls.example/docs/m1.pdf",
+                source_type=SourceType.MANUFACTURER_MANUAL,
+            ),
+            fetchers=[PdfFetcher(transport=httpx.MockTransport(handler))],
+            limits=retrieval_limits_from_settings(),
+        )
+        assert result.retrieval_status == RetrievalStatus.SUCCESS
+        assert result.error_kind is None
+        # text was extracted (and head-truncated by the settings text cap)
+        assert result.text.startswith("A" * 20)
+        assert len(result.text) <= 20_000 + len(TRUNCATION_MARKER) + 20
+
+    def test_pdf_above_25mb_rejected_with_size_limit(self):
+        body = make_large_pdf_bytes(25_000_000 + 10_000)
+        assert len(body) > 25_000_000
+        assert len(body) < 25_000_000 + 20_000
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=body, headers={"content-type": "application/pdf"}
+            )
+
+        result = retrieve_candidate(
+            make_candidate(
+                url="https://acme-controls.example/docs/m1.pdf",
+                source_type=SourceType.MANUFACTURER_MANUAL,
+            ),
+            fetchers=[PdfFetcher(transport=httpx.MockTransport(handler))],
+            limits=retrieval_limits_from_settings(),
+        )
+        assert result.retrieval_status == RetrievalStatus.FAILED
+        assert result.error_kind == RetrievalErrorKind.SIZE_LIMIT
+        assert "25000000" in result.error_message
+
+    def test_html_5mb_cap_still_enforced(self):
+        body = b"<html><body>" + b"A" * (5_000_000 - 20) + b"</body></html>"
+        assert len(body) > 5_000_000
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=body, headers={"content-type": "text/html"}
+            )
+
+        result = retrieve_candidate(
+            make_candidate(),
+            fetchers=[HtmlFetcher(transport=httpx.MockTransport(handler))],
+            limits=retrieval_limits_from_settings(),
+        )
+        assert result.retrieval_status == RetrievalStatus.FAILED
+        assert result.error_kind == RetrievalErrorKind.SIZE_LIMIT
+        assert "5000000" in result.error_message
