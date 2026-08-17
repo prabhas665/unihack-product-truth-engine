@@ -1,7 +1,7 @@
 {
   "by_mpn": {
     "PDSH4816AF": { "manufacturer": "Rheem Manufacturing", "brand": "FRIGIDAIRE", "trade_name": "" },
-    "WDTS7024RZ": { "manufacturer": "Whirlpool Corporation", "brand": "Whirlpool", "trade_name": "", "domains": ["whirlpool.com"] },
+    "WDTS7024RZ": { "manufacturer": "Whirlpool Corporation", "brand": "Whirlpool", "trade_name": "", "domains": ["whirlpool.com", "whirlpool.ca"] },
     "1700-1PK-BB40": { "manufacturer": "3M", "brand": "3M", "trade_name": "", "domains": ["3m.com"] },
     "49-94-0013": { "manufacturer": "Milwaukee Tool", "brand": "Milwaukee", "trade_name": "", "domains": ["milwaukeetool.com"] },
     "XLC10ZW": { "manufacturer": "Makita Usa Inc", "brand": "Makita", "trade_name": "", "domains": ["makitatools.com"] },

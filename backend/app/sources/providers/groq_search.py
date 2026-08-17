@@ -335,7 +335,10 @@ class GroqSearchProvider:
         """Return candidate sources for the product via Groq web search.
 
         1. Build search query from product identity (reused from search.py).
-        2. Call Groq web_search with manufacturer domains (if known).
+        2. Call Groq web_search with manufacturer domains (if known) ONLY
+           when context.query_biased is True; when False, no site: hints are
+           sent (Discovery-2 pass 2 recall). query_biased never changes what
+           SourcePolicy may trust.
         3. Parse executed_tools search_results into SourceCandidates.
         4. Rank candidates via existing rank_candidates().
         5. Return PENDING / UNVERIFIED candidates (SourcePolicy decides ALLOWED).
@@ -346,9 +349,10 @@ class GroqSearchProvider:
 
         include_domains: list[str] = []
         if context is not None:
-            include_domains = list(
-                getattr(context, "manufacturer_domains", []) or []
-            )
+            if bool(getattr(context, "query_biased", True)):
+                include_domains = list(
+                    getattr(context, "manufacturer_domains", []) or []
+                )
 
         results = self._api_client.web_search(query, include_domains=include_domains)
         candidates = _build_candidates(results)

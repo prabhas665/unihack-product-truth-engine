@@ -416,7 +416,9 @@ class TestDiscoveryFlowWithGeminiProvider:
         )
         assert result.total_discovered == 0
         assert result.candidates == []
-        assert len(result.provider_errors) == 1
+        # Pass 1 allowed nothing, so pass 2 also ran and failed; both typed
+        # errors are recorded - discovery never aborts, never fabricates.
+        assert len(result.provider_errors) == 2
         error = result.provider_errors[0]
         assert error.provider_name == "gemini"
         assert error.error_kind == "unavailable"

@@ -10,7 +10,7 @@ network calls.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -60,11 +60,18 @@ class DiscoveryContext:
     manufacturer_domains stays empty until the official UniHack manufacturer
     registry is available; it is intentionally not fabricated. policy_config
     overrides the environment-derived default policy.
+
+    query_biased decouples QUERY BIAS from TRUST AUTHORITY: when True,
+    providers may steer search queries toward the trusted domains (site:
+    hints); when False they must not. It never affects SourcePolicy trust -
+    manufacturer_domains are always available to the policy regardless of
+    query_biased.
     """
 
     product: ProductIdentity
     manufacturer_domains: list[str] = field(default_factory=list)
     policy_config: SourcePolicyConfig | None = None
+    query_biased: bool = True
 
 
 class ProviderErrorInfo(BaseModel):
@@ -102,7 +109,7 @@ def run_discovery(
     providers: list[SourceProvider] | None = None,
     context: DiscoveryContext | None = None,
 ) -> DiscoveryResult:
-    """Discover -> policy-filter -> rank.
+    """Discover -> policy-filter -> rank, with a recall pass (Discovery-2).
 
     Uses the providers selected by DISCOVERY_PROVIDER (or the registered
     registry when unset) unless `providers` is given explicitly. Every
@@ -110,25 +117,28 @@ def run_discovery(
     never decide acceptability. Typed ProviderError failures are recorded on
     the result and discovery continues. No network calls are made by this
     function itself.
+
+    Pass 1 runs the providers normally (query_biased=True, so trusted-domain
+    site: hints may steer the search). When Pass 1 yields zero ALLOWED
+    candidates, Pass 2 re-runs the SAME providers with query_biased=False
+    (no site: hints) to widen recall; both candidate sets are merged,
+    deduplicated by URL, and filtered ONCE by the same SourcePolicy.
+    query_biased only changes search steering - the policy still trusts
+    exactly manufacturer_domains. A Pass 2 failure never erases Pass 1
+    results, and a candidate is never fabricated.
     """
     ctx = context or DiscoveryContext(product=product)
     providers = providers if providers is not None else _default_providers()
 
-    discovered: list[SourceCandidate] = []
-    provider_errors: list[ProviderErrorInfo] = []
-    for provider in providers:
-        try:
-            discovered.extend(provider.discover(product, ctx))
-        except ProviderError as exc:
-            provider_errors.append(
-                ProviderErrorInfo(
-                    provider_name=exc.provider_name,
-                    error_kind=exc.kind,
-                    message=exc.message,
-                )
-            )
-
+    discovered, provider_errors = _run_providers(providers, product, ctx)
     policy = _build_policy(ctx)
+    allowed, _ = policy.filter(discovered)
+    if not allowed:
+        fallback_ctx = replace(ctx, query_biased=False)
+        more, more_errors = _run_providers(providers, product, fallback_ctx)
+        discovered = _dedupe_candidates([*discovered, *more])
+        provider_errors = [*provider_errors, *more_errors]
+
     allowed, rejected = policy.filter(discovered)
     ranked = rank_candidates(allowed, product)
 
@@ -139,6 +149,43 @@ def run_discovery(
         total_discovered=len(discovered),
         provider_errors=provider_errors,
     )
+
+
+def _run_providers(
+    providers: list[SourceProvider],
+    product: ProductIdentity,
+    context: DiscoveryContext,
+) -> tuple[list[SourceCandidate], list[ProviderErrorInfo]]:
+    """Run every provider once; typed failures become ProviderErrorInfo."""
+    discovered: list[SourceCandidate] = []
+    provider_errors: list[ProviderErrorInfo] = []
+    for provider in providers:
+        try:
+            discovered.extend(provider.discover(product, context))
+        except ProviderError as exc:
+            provider_errors.append(
+                ProviderErrorInfo(
+                    provider_name=exc.provider_name,
+                    error_kind=exc.kind,
+                    message=exc.message,
+                )
+            )
+    return discovered, provider_errors
+
+
+def _dedupe_candidates(
+    candidates: list[SourceCandidate],
+) -> list[SourceCandidate]:
+    """Keep the first candidate per URL; order is preserved."""
+    seen: set[str] = set()
+    out: list[SourceCandidate] = []
+    for candidate in candidates:
+        url = (candidate.url or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(candidate)
+    return out
 
 
 def _default_providers() -> list[SourceProvider]:

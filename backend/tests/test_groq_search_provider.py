@@ -601,7 +601,10 @@ class TestDiscoveryFlowWithGroqProvider:
         )
         assert result.total_discovered == 0
         assert result.candidates == []
-        assert len(result.provider_errors) == 1
+        # Pass 1 produced no allowed candidates, so pass 2 also ran and also
+        # failed; BOTH typed errors are recorded - discovery never aborts
+        # and never fabricates candidates.
+        assert len(result.provider_errors) == 2
         error = result.provider_errors[0]
         assert error.provider_name == "groq"
         assert error.error_kind == "unavailable"
@@ -677,6 +680,63 @@ class TestDomainSiteHint:
             DiscoveryContext(
                 product=make_product(), manufacturer_domains=ACME_DOMAINS
             ),
+        )
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:acme-controls.example" in content
+
+    def test_query_biased_true_preserves_site_hint_behavior(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json=search_payload())
+
+        provider = GroqSearchProvider(mock_client(handler))
+        provider.discover(
+            make_product(),
+            DiscoveryContext(
+                product=make_product(),
+                manufacturer_domains=ACME_DOMAINS,
+                query_biased=True,
+            ),
+        )
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:acme-controls.example" in content
+        assert "tools" not in captured["body"]
+
+    def test_query_biased_false_never_appends_site_hint(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json=search_payload())
+
+        provider = GroqSearchProvider(mock_client(handler))
+        provider.discover(
+            make_product(),
+            DiscoveryContext(
+                product=make_product(),
+                manufacturer_domains=ACME_DOMAINS,
+                query_biased=False,
+            ),
+        )
+        content = captured["body"]["messages"][0]["content"]
+        assert "site:" not in content
+        # Trusted domains are NOT leaked into an unbiased query either.
+        assert "acme-controls.example" not in content
+        assert "tools" not in captured["body"]
+
+    def test_query_biased_defaults_to_true(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json=search_payload())
+
+        provider = GroqSearchProvider(mock_client(handler))
+        provider.discover(
+            make_product(),
+            DiscoveryContext(product=make_product(), manufacturer_domains=ACME_DOMAINS),
         )
         content = captured["body"]["messages"][0]["content"]
         assert "site:acme-controls.example" in content

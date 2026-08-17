@@ -102,7 +102,14 @@ def test_domains_for_mpn_seed():
     lookup = VerifiedBrandLookup.default()
     assert lookup.domains_for(
         "WDTS7024RZ", "-- Unbranded --", "-- No DIB Brand --", "X (APPDE)",
-    ) == ["whirlpool.com"]
+    ) == ["whirlpool.com", "whirlpool.ca"]
+
+
+def test_domains_for_whirlpool_mpn_includes_ca_and_com():
+    lookup = VerifiedBrandLookup.default()
+    out = lookup.domains_for("WDTS7024RZ", "-- Unbranded --", "-- No DIB Brand --", "-")
+    assert "whirlpool.com" in out
+    assert "whirlpool.ca" in out
 
 
 def test_domains_for_real_brand_seed():
@@ -132,6 +139,6 @@ def test_domains_for_normalizes_and_dedupes():
         "WDTS7024RZ", "-- Unbranded --", "-- No DIB Brand --", "Whirlpool Corporation",
     )
     # MPN seed already matched: brand/manufacturer paths are skipped.
-    assert out == ["whirlpool.com"]
+    assert out == ["whirlpool.com", "whirlpool.ca"]
     # stored as bare (no scheme / no www)
     assert all(not d.startswith("www.") for d in out)

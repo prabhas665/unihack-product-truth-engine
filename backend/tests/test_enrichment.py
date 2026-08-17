@@ -516,8 +516,13 @@ class TestSparseAndFailedRuns:
             llm=FakeLLMClient(output=canned_output()),
         ).run(default_request())
 
-        assert len(result.discovery.provider_errors) == 1
-        assert result.discovery.provider_errors[0].error_kind == "unavailable"
+        # Pass 1 allowed nothing, so pass 2 also ran and failed; both typed
+        # errors are recorded - the run never aborts and never fabricates.
+        assert len(result.discovery.provider_errors) == 2
+        assert all(
+            e.error_kind == "unavailable"
+            for e in result.discovery.provider_errors
+        )
         assert any("search API timed out" in r for r in result.review_reasons)
         # The provider failed, so nothing could be enriched: needs review.
         assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
