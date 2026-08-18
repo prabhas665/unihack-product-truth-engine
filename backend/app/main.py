@@ -14,6 +14,7 @@ from app.api.routes import (
     health,
     lookup,
 )
+from app.unihack.paths import repo_root
 from app.config import settings
 from app.db.database import init_db
 
@@ -49,7 +50,13 @@ app.include_router(evaluation.router)
 # Optional same-origin frontend serving (single-service deployment). The built
 # dist is mounted at "/" after the API routers so /api/* still wins; the SPA
 # has no client-side routing, so the index catch-all is sufficient.
+# When FRONTEND_DIST_DIR is empty the built SPA at repo_root()/frontend/dist is
+# served automatically if it exists (single-service deployments on Render).
 _dist = settings.frontend_dist_dir.strip()
+if not _dist:
+    _default_dist = repo_root() / "frontend" / "dist"
+    if _default_dist.is_dir():
+        _dist = str(_default_dist)
 if _dist:
     _dist_path = Path(_dist)
     if _dist_path.is_dir():
