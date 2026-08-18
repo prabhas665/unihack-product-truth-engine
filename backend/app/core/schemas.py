@@ -9,6 +9,18 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class LLMHealthResponse(BaseModel):
+    """Read-only LLM connectivity status. Never contains key material."""
+
+    provider: str
+    model: str
+    fallback_models: list[str] = Field(default_factory=list)
+    key_configured: bool
+    chat_completions_status: int | None = None
+    error: str = ""
+    elapsed_ms: int = 0
+
+
 class LookupRequest(BaseModel):
     """Quick lookup: manufacturer + part number, optionally brand/description."""
 
