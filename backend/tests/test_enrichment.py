@@ -164,7 +164,7 @@ def success_record(
     url: str,
     *,
     evidence_id: str,
-    text: str = "Diablo sanding belt, 1/2 inch x 18 inch, pack of 6.",
+    text: str = "DCB518ASTS06G Diablo sanding belt, 0.5 inch x 18 inch, pack of 6.",
 ) -> EvidenceRecord:
     return EvidenceRecord(
         evidence_id=evidence_id,

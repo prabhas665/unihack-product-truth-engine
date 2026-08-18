@@ -85,8 +85,8 @@ class FakeLLMClient(LLMClient):
                 items=[
                     ExtractionOutputItem(
                         name="voltage",
-                        raw_value="18 V",
-                        normalized_value="18 V",
+                        raw_value="18V",
+                        normalized_value="18V",
                         unit="V",
                         confidence=0.9,
                         evidence_ids=[EVIDENCE],

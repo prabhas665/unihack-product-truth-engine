@@ -6,6 +6,15 @@ without usable evidence are rejected with a reason. Conflicts are NOT
 resolved here - they are represented as multiple candidates for the future
 validation stage.
 
+P0 claim-support gate: an accepted attribute must carry a deterministic,
+verbatim (whitespace-tolerant) value occurrence in at least one cited
+evidence record, attributed to the requested product's own passage (near
+the requested MPN) or to family copy not attributable to any other product.
+Claims whose value only appears near OTHER products' codes - or not at all
+- are rejected with "claim not found in cited evidence" and never carry a
+quote. The gate is fully deterministic and applies to every acceptance
+path (JSON output, LLM-5 salvage, and the bullet-list fallback).
+
 The service is separate from the LLM provider (app.llm): it only talks to
 the provider-agnostic LLMClient interface.
 """
@@ -21,9 +30,13 @@ from app.core.domain import (
     AttributeValue,
     CandidateValue,
     ConflictStatus,
+    ProductIdentity,
 )
 from app.extraction.prompt import SYSTEM_PROMPT, build_extraction_prompt
-from app.extraction.quotes import resolve_quote
+from app.extraction.quotes import (
+    CLAIM_MPN_WINDOW_CHARS,
+    find_supported_quote,
+)
 from app.extraction.types import (
     CandidateAttribute,
     ExtractionError,
@@ -216,7 +229,9 @@ class ExtractionService:
         except LLMInvalidResponseError as exc:
             raw_items = exc.raw.get("items") if isinstance(exc.raw, dict) else None
             if isinstance(raw_items, list):
-                return self._salvage_items(raw_items, known_ids, records_by_id)
+                return self._salvage_items(
+                    raw_items, known_ids, records_by_id, request.identity.mpn
+                )
             fallback = self._fallback_extract(request, prompt)
             if fallback is None:
                 raise ExtractionError(
@@ -234,7 +249,10 @@ class ExtractionService:
         for item in output.items:
             candidate, reason = self._validate_item(item, known_ids)
             if candidate is not None:
-                candidate = self._attach_quote(candidate, records_by_id)
+                candidate, reason = self._claim_support(
+                    candidate, records_by_id, request.identity.mpn
+                )
+            if candidate is not None:
                 attributes.append(candidate)
             else:
                 rejected.append(
@@ -256,6 +274,7 @@ class ExtractionService:
         raw_items: list[object],
         known_ids: set[str],
         records_by_id: dict[str, "EvidenceRecord"],
+        mpn: str,
     ) -> ExtractionResponse:
         """Recover usable attributes from a partially invalid response.
 
@@ -266,7 +285,9 @@ class ExtractionService:
         ONLY that attribute. Items failing the item schema or evidence
         binding are rejected individually; valid items are preserved
         verbatim (name, raw_value, normalized_value, unit, evidence_ids,
-        notes) - nothing is fabricated.
+        notes) - nothing is fabricated. Valid items still pass through the
+        P0 claim-support gate: claims without a supported value occurrence
+        are rejected with "claim not found in cited evidence".
         """
         attributes: list[CandidateAttribute] = []
         rejected: list[RejectedAttribute] = []
@@ -304,7 +325,9 @@ class ExtractionService:
                 continue
             candidate, reason = self._validate_item(item, known_ids)
             if candidate is not None:
-                attributes.append(self._attach_quote(candidate, records_by_id))
+                candidate, reason = self._claim_support(candidate, records_by_id, mpn)
+            if candidate is not None:
+                attributes.append(candidate)
             else:
                 rejected.append(
                     RejectedAttribute(
@@ -340,24 +363,44 @@ class ExtractionService:
         return _parse_bullet_output(raw, known_ids)
 
     @staticmethod
-    def _attach_quote(
+    def _claim_support(
         candidate: CandidateAttribute,
         records_by_id: dict[str, "EvidenceRecord"],
-    ) -> CandidateAttribute:
-        """Resolve the exact supporting quote from the first evidence record.
+        mpn: str,
+    ) -> tuple[CandidateAttribute | None, str]:
+        """P0 claim-support gate: accept only claims the evidence supports.
 
-        Uses the evidence text already attached to the retrieved record;
-        quotes are derived verbatim or left empty - never invented.
+        The claimed value must be deterministically found (verbatim,
+        whitespace-tolerant) in at least one cited evidence record: in the
+        requested product's own passage (within CLAIM_MPN_WINDOW_CHARS of
+        the requested MPN), or in copy not attributable to any other
+        product. An empty quote is never accepted. The quote is anchored to
+        the supporting occurrence, so a supported claim never carries a
+        quote from a sibling product's passage.
+
+        Returns (candidate_with_quote, "") on support, or
+        (None, "claim not found in cited evidence") when the claim must be
+        rejected. Fully deterministic - no LLM call, no fuzzy matching.
         """
-        record = records_by_id.get(candidate.evidence_ids[0])
-        if record is None:
-            return candidate
-        quote = resolve_quote(
-            record.text, candidate.normalized_value, candidate.raw_value
-        )
+        values = [candidate.normalized_value, candidate.raw_value]
+        anchored_quote = ""
+        generic_quote = ""
+        for eid in candidate.evidence_ids:
+            record = records_by_id.get(eid)
+            if record is None:
+                continue
+            quote, anchored = find_supported_quote(
+                record.text, values, mpn, CLAIM_MPN_WINDOW_CHARS
+            )
+            if anchored:
+                anchored_quote = quote
+                break
+            if quote and not generic_quote:
+                generic_quote = quote
+        quote = anchored_quote or generic_quote
         if not quote:
-            return candidate
-        return candidate.model_copy(update={"quote": quote})
+            return None, "claim not found in cited evidence"
+        return candidate.model_copy(update={"quote": quote}), ""
 
     @staticmethod
     def _validate_item(

@@ -95,8 +95,11 @@ class CandidateAttribute(BaseModel):
     # Concise, evidence-based, user-safe note (never chain-of-thought).
     notes: str = ""
     # Exact short excerpt of the supporting evidence text (Step 8B),
-    # resolved deterministically from the retrieved record; "" means no
-    # verbatim quote could be resolved ("Evidence quote unavailable").
+    # resolved deterministically from the retrieved record and anchored to
+    # the requested product's own passage (P0 claim-support gate). Non-empty
+    # for every accepted attribute: a claim without a supported occurrence
+    # is rejected ("claim not found in cited evidence") instead of being
+    # accepted with an empty quote.
     quote: str = ""
 
 
@@ -111,8 +114,10 @@ class RejectedAttribute(BaseModel):
 class ExtractionResponse(BaseModel):
     """Result of one extraction run.
 
-    `attributes` contains only evidence-supported candidates; everything the
-    LLM claimed without usable evidence lands in `rejected` with a reason.
+    `attributes` contains only claim-supported candidates (P0 gate: the
+    value must occur deterministically in the cited evidence, in the
+    requested product's own passage or unattributable family copy);
+    everything else the LLM claimed lands in `rejected` with a reason.
     Conflicts are NOT resolved - multiple candidates with the same name are
     allowed and flagged later by the validation stage.
     """

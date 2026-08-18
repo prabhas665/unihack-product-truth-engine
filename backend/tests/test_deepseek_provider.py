@@ -235,13 +235,13 @@ class TestEvidenceFirstExtraction:
             url="https://acme-controls.example/products/m1",
             source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
             title="M1 Controller",
-            text="The M1 controller draws 100 watts and measures 200 mm wide.",
+            text="The M1 controller draws 100 W and measures 200 mm wide.",
             status=RetrievalStatus.SUCCESS,
         )
 
         def handler(request: httpx.Request) -> httpx.Response:
             sent = request.read().decode()
-            assert "M1 controller draws 100 watts" in sent  # evidence reaches LLM
+            assert "M1 controller draws 100 W" in sent  # evidence reaches LLM
             assert "ev-1" in sent
             return json_completion(
                 '{"items": [{"name": "Power", "raw_value": "100 W", '

@@ -1,0 +1,60 @@
+{
+  "attributes": [
+    {
+      "name": "Voltage",
+      "raw_value": "18V",
+      "normalized_value": "18",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Motor Type",
+      "raw_value": "Brushless",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Speed Settings",
+      "raw_value": "4-Speed",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Dust Bag Included",
+      "raw_value": "Dust Bag Included",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Power Source",
+      "raw_value": "Cordless",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Battery Chemistry",
+      "raw_value": "Lithium-ion",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    },
+    {
+      "name": "Product Type",
+      "raw_value": "Compact Vacuum",
+      "normalized_value": "",
+      "evidence_ids": [
+        "fb15f75b69ed"
+      ]
+    }
+  ]
+}

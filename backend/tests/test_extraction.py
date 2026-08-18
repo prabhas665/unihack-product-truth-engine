@@ -266,11 +266,11 @@ class TestPrompt:
 
 class TestBulletFallback:
     def test_bullet_output_parsed_with_evidence_binding(self):
-        record = make_evidence("ev-1", "The M1 operates at 24 V.")
+        record = make_evidence("ev-1", "The M1 operates at 24 V DC.")
         client = FakeLLMClient(
             responses=[
                 "this is definitely not json",
-                "- Voltage: 24 V [ev-1]\n- Motor Type: Brushless [ev-1]\n"
+                "- Voltage: 24 V [ev-1]\n- Motor Type: DC [ev-1]\n"
                 "Notes: all from the page",
             ]
         )
@@ -284,17 +284,17 @@ class TestBulletFallback:
         assert response.attributes[1].confidence == 0.0
 
     def test_bullet_with_unknown_evidence_id_is_dropped(self):
-        record = make_evidence("ev-1", "The M1 operates at 24 V.")
+        record = make_evidence("ev-1", "The M1 operates at 24 V DC.")
         client = FakeLLMClient(
             responses=[
                 "not json either",
-                "- Voltage: 24 V [ev-99]\n- Length: 100 mm [ev-1]",
+                "- Voltage: 24 V [ev-99]\n- Motor Type: DC [ev-1]",
             ]
         )
         service = ExtractionService(client)
         response = service.extract(make_request(record))
         assert len(response.attributes) == 1
-        assert response.attributes[0].name == "Length"
+        assert response.attributes[0].name == "Motor Type"
 
     def test_bullet_without_usable_evidence_raises_schema_invalid(self):
         record = make_evidence("ev-1", "The M1 operates at 24 V.")
@@ -373,23 +373,28 @@ class TestEvidenceQuotes:
         attribute = service.extract(make_request(record)).attributes[0]
         assert "24 V DC" in attribute.quote
 
-    def test_quote_unavailable_when_value_is_not_in_the_text(self):
+    def test_claim_without_value_in_text_rejected(self):
         record = make_evidence("ev-1", "The M1 has IP65 protection.")
         service = service_with(
             '{"items": [{"name": "voltage", "raw_value": "24 V DC", '
             '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
         )
-        attribute = service.extract(make_request(record)).attributes[0]
-        assert attribute.quote == ""
+        response = service.extract(make_request(record))
+        assert response.attributes == []
+        assert len(response.rejected) == 1
+        assert response.rejected[0].name == "voltage"
+        assert "claim not found in cited evidence" in response.rejected[0].reason
 
-    def test_quote_unavailable_for_empty_evidence_text(self):
+    def test_claim_without_value_in_empty_evidence_text_rejected(self):
         record = make_evidence("ev-1", "")
         service = service_with(
             '{"items": [{"name": "voltage", "raw_value": "24 V", '
             '"confidence": 0.9, "evidence_ids": ["ev-1"]}]}'
         )
-        attribute = service.extract(make_request(record)).attributes[0]
-        assert attribute.quote == ""
+        response = service.extract(make_request(record))
+        assert response.attributes == []
+        assert len(response.rejected) == 1
+        assert "claim not found in cited evidence" in response.rejected[0].reason
 
     def test_quote_uses_the_earliest_occurrence(self):
         record = make_evidence(

@@ -74,7 +74,7 @@ class TestNumericConfidence:
         assert response.rejected == []
 
     def test_confidence_zero_and_one_are_valid(self):
-        record = make_evidence("ev-1", "The M1 is 24 V.")
+        record = make_evidence("ev-1", "The M1 is 24 V and draws 120 W.")
         client = FakeLLMClient(
             responses=[
                 '{"items": [{"name": "voltage", "raw_value": "24", '
@@ -151,7 +151,9 @@ class TestTextualConfidenceNormalization:
 
 class TestRejectedConfidence:
     def test_unknown_confidence_string_rejects_only_that_item(self):
-        record = make_evidence("ev-1", "The M1 operates at 24 V DC.")
+        record = make_evidence(
+            "ev-1", "The M1 operates at 24 V DC and has IP65 protection."
+        )
         response = extract_with(
             FakeLLMClient(
                 responses=[
@@ -173,7 +175,9 @@ class TestRejectedConfidence:
         assert "not a number" in response.rejected[0].reason
 
     def test_out_of_range_numeric_confidence_rejects_only_that_item(self):
-        record = make_evidence("ev-1", "The M1 operates at 24 V DC.")
+        record = make_evidence(
+            "ev-1", "The M1 operates at 24 V DC. Length is 100 mm."
+        )
         response = extract_with(
             FakeLLMClient(
                 responses=[
