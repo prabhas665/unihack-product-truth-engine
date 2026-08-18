@@ -21,14 +21,21 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     # Default timeout for provider calls (seconds); per-request overrides exist.
     llm_timeout_seconds: float = 30.0
-    # Optional fallback model for EXTRACTION ONLY (Step LLM-8): used only
-    # when the primary LLM call times out or is unavailable. Empty =
-    # failover disabled (current behavior). The fallback always uses the
-    # primary OpenRouter configuration/key with a different model id.
+    # Optional fallback models for EXTRACTION ONLY (Step LLM-8): used only
+    # when the primary LLM call times out or is unavailable, tried in
+    # order. Empty = that fallback is skipped (current behavior when both
+    # are empty). Each fallback always uses the primary OpenRouter
+    # configuration/key with a different model id.
     llm_fallback_model: str = ""
-    # Per-attempt timeout for the fallback model; None = reuse
+    # Per-attempt timeout for the first fallback model; None = reuse
     # LLM_TIMEOUT_SECONDS.
     llm_fallback_timeout_seconds: float | None = None
+    # Second ordered fallback model for extraction (attempted only when
+    # the primary AND the first fallback both time out or are unavailable).
+    llm_fallback_model_2: str = ""
+    # Per-attempt timeout for the second fallback model; None = reuse
+    # LLM_FALLBACK_TIMEOUT_SECONDS, then LLM_TIMEOUT_SECONDS.
+    llm_fallback_timeout_seconds_2: float | None = None
 
     # Source discovery policy: comma-separated domain patterns (see
     # app/sources/policy.py). No UniHack data is hard-coded here; the

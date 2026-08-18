@@ -112,33 +112,43 @@ DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter tim
 EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
 
 
-def _build_extraction_fallback_client(
+def _build_extraction_fallback_clients(
     reasons: list[str],
-) -> LLMClient | None:
-    """Build the extraction-only fallback client (Step LLM-8).
+) -> list[LLMClient]:
+    """Build the ordered extraction-only fallback client chain (Step LLM-8).
 
-    Disabled unless LLM_FALLBACK_MODEL is set. The fallback always reuses
+    Disabled unless LLM_FALLBACK_MODEL is set. Fallbacks are tried in
+    order (LLM_FALLBACK_MODEL, then LLM_FALLBACK_MODEL_2) and always reuse
     the primary OpenRouter configuration (same key and base URL) with a
-    different model id. Returns None (failover disabled) when the env var is
+    different model id. Returns [] (failover disabled) when the env vars are
     empty or construction fails - a review reason is appended instead of
     crashing the run.
     """
-    model = (settings.llm_fallback_model or "").strip()
-    if not model:
-        return None
-    try:
-        return OpenRouterClient(
-            api_key=settings.llm_api_key,
-            model=model,
-            base_url=settings.llm_base_url,
-            timeout_seconds=(
-                settings.llm_fallback_timeout_seconds
-                or settings.llm_timeout_seconds
-            ),
-        )
-    except LLMConfigurationError as exc:
-        reasons.append(f"extraction fallback model not configured: {exc}")
-        return None
+    clients: list[LLMClient] = []
+    for model_attr, timeout_attr in (
+        ("llm_fallback_model", "llm_fallback_timeout_seconds"),
+        ("llm_fallback_model_2", "llm_fallback_timeout_seconds_2"),
+    ):
+        model = (getattr(settings, model_attr) or "").strip()
+        if not model:
+            continue
+        timeout = getattr(settings, timeout_attr)
+        if timeout is None:
+            timeout = settings.llm_fallback_timeout_seconds
+        if timeout is None:
+            timeout = settings.llm_timeout_seconds
+        try:
+            clients.append(
+                OpenRouterClient(
+                    api_key=settings.llm_api_key,
+                    model=model,
+                    base_url=settings.llm_base_url,
+                    timeout_seconds=timeout,
+                )
+            )
+        except LLMConfigurationError as exc:
+            reasons.append(f"extraction fallback model not configured: {exc}")
+    return clients
 
 
 class StageName(str, Enum):
@@ -890,11 +900,12 @@ class EnrichmentService:
                 reasons.append(f"extraction failed: {exc}")
                 return None, note, reasons, None
 
-        fallback_client = _build_extraction_fallback_client(reasons)
+        fallback_clients = _build_extraction_fallback_clients(reasons)
         service = ExtractionService(
             client,
-            fallback_client=fallback_client,
+            fallback_clients=fallback_clients,
             fallback_timeout_seconds=settings.llm_fallback_timeout_seconds,
+            fallback_timeout_seconds_2=settings.llm_fallback_timeout_seconds_2,
         )
         try:
             response = service.extract(
@@ -914,11 +925,12 @@ class EnrichmentService:
                 note = EXTRACTION_TIMEOUT_REASON
                 reasons.append(EXTRACTION_TIMEOUT_REASON)
                 return None, note, reasons, StageStatus.NEEDS_REVIEW
-            if fallback_client is not None and exc.kind == ExtractionErrorKind.LLM_FAILED:
-                # Both the primary and the fallback model failed: the run
-                # still survives with the stage NEEDS_REVIEW (evidence and
-                # delivery are preserved, and nothing is fabricated).
-                note = "both the primary and the fallback extraction attempts failed"
+            if fallback_clients and exc.kind == ExtractionErrorKind.LLM_FAILED:
+                # Every extraction attempt (primary + all fallback models)
+                # failed: the run still survives with the stage NEEDS_REVIEW
+                # (evidence and delivery are preserved, and nothing is
+                # fabricated).
+                note = "all extraction attempts failed (primary + fallback models)"
                 reasons.append(note)
                 return None, note, reasons, StageStatus.NEEDS_REVIEW
             return None, note, reasons, None

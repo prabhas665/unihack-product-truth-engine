@@ -263,7 +263,7 @@ class TestBothAttemptsFailed:
             service.extract(make_request())
         assert exc_info.value.kind == ExtractionErrorKind.LLM_FAILED
         assert isinstance(exc_info.value.__cause__, LLMTimeoutError)
-        assert "both the primary and the fallback" in exc_info.value.message
+        assert "primary and all fallback attempts" in exc_info.value.message
 
     def test_fallback_unavailable_raises_with_fallback_cause(self):
         primary = RecordingClient(error=LLMTimeoutError("primary timed out"))
@@ -476,6 +476,7 @@ def make_service(llm: PipelineLLM) -> EnrichmentService:
 
 def enable_fallback(monkeypatch, *, model: str = "fallback/model:free") -> None:
     monkeypatch.setattr(settings, "llm_fallback_model", model)
+    monkeypatch.setattr(settings, "llm_fallback_model_2", "")
     StubOpenRouterClient.instances.clear()
     monkeypatch.setattr(
         enrichment_module, "OpenRouterClient", StubOpenRouterClient
@@ -559,6 +560,7 @@ class TestPipelineStageMapping:
         # No LLM_FALLBACK_MODEL -> no fallback client is ever constructed
         # and extraction behaves exactly as before.
         monkeypatch.setattr(settings, "llm_fallback_model", "")
+        monkeypatch.setattr(settings, "llm_fallback_model_2", "")
         StubOpenRouterClient.instances.clear()
         monkeypatch.setattr(
             enrichment_module, "OpenRouterClient", StubOpenRouterClient

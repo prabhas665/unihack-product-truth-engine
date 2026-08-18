@@ -22,6 +22,7 @@ the provider-agnostic LLMClient interface.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from pydantic import ValidationError
 
@@ -150,10 +151,10 @@ def _parse_bullet_output(raw: str, known_ids: set[str]) -> ExtractionOutput | No
 class ExtractionService:
     """Extracts evidence-bound candidate attributes via an LLM client.
 
-    An optional ``fallback_client`` (Step LLM-8) is used ONLY when the
-    primary call fails with a timeout or provider-unavailability: each
+    An ordered list of ``fallback_clients`` (Step LLM-8) is used ONLY when
+    a primary call fails with a timeout or provider-unavailability: each
     attempt has its own bounded timeout, schema-invalid responses are
-    handled locally (never by failover), and when both clients fail the
+    handled locally (never by failover), and when every client fails the
     caller receives the same typed ExtractionError it gets today (the
     pipeline maps it to NEEDS_REVIEW with evidence preserved).
     """
@@ -162,11 +163,22 @@ class ExtractionService:
         self,
         client: LLMClient,
         fallback_client: LLMClient | None = None,
+        fallback_clients: Sequence[LLMClient] | None = None,
         fallback_timeout_seconds: float | None = None,
+        fallback_timeout_seconds_2: float | None = None,
     ) -> None:
+        # ``fallback_client`` is a legacy convenience that feeds the first
+        # slot of the ordered chain; ``fallback_clients`` is the primary
+        # way to configure more than one fallback.
+        clients: list[LLMClient] = []
+        if fallback_client is not None:
+            clients.append(fallback_client)
+        if fallback_clients:
+            clients.extend(fallback_clients)
         self._client = client
-        self._fallback_client = fallback_client
+        self._fallback_clients = clients
         self._fallback_timeout_seconds = fallback_timeout_seconds
+        self._fallback_timeout_seconds_2 = fallback_timeout_seconds_2
 
     def extract(self, request: ExtractionRequest) -> ExtractionResponse:
         """Run one extraction over the supplied evidence records.
@@ -176,12 +188,13 @@ class ExtractionService:
         or provider failure). Evidence-binding problems are reported per
         attribute via `rejected`.
 
-        A timeout or provider-unavailability is retried once against the
-        optional fallback client (same evidence, same prompt, its own
-        bounded timeout); schema-invalid application data never triggers a
-        failover. When both attempts fail, ExtractionError(LLM_FAILED) is
-        raised with the fallback error as the cause - the pipeline then
-        marks the stage NEEDS_REVIEW without fabricating anything.
+        A timeout or provider-unavailability on the primary client is
+        retried against the ordered fallback clients (same evidence, same
+        prompt, each with its own bounded timeout), in order: fallback 1,
+        then fallback 2. Schema-invalid application data never triggers a
+        failover. When every attempt fails, ExtractionError(LLM_FAILED) is
+        raised with the last error as the cause - the pipeline then marks
+        the stage NEEDS_REVIEW without fabricating anything.
 
         A partially valid structured response (one malformed attribute among
         valid ones) is salvaged per attribute: valid items are kept with
@@ -207,25 +220,39 @@ class ExtractionService:
                 )
             )
         except (LLMTimeoutError, LLMProviderUnavailableError) as exc:
-            if self._fallback_client is None:
+            if not self._fallback_clients:
                 raise ExtractionError(
                     ExtractionErrorKind.LLM_FAILED, f"LLM call failed: {exc}"
                 ) from exc
-            try:
-                output = self._fallback_client.structured_completion(
-                    StructuredCompletionRequest(
-                        system_prompt=SYSTEM_PROMPT,
-                        user_prompt=prompt,
-                        output_schema=ExtractionOutput,
-                        timeout_seconds=self._fallback_timeout_seconds,
-                    )
+            output = None
+            failures: list[tuple[int, LLMError]] = [(0, exc)]
+            for index, fallback in enumerate(self._fallback_clients):
+                timeout = (
+                    self._fallback_timeout_seconds_2
+                    if index == 1
+                    else self._fallback_timeout_seconds
                 )
-            except LLMError as fallback_exc:
+                try:
+                    output = fallback.structured_completion(
+                        StructuredCompletionRequest(
+                            system_prompt=SYSTEM_PROMPT,
+                            user_prompt=prompt,
+                            output_schema=ExtractionOutput,
+                            timeout_seconds=timeout,
+                        )
+                    )
+                    break
+                except (LLMTimeoutError, LLMProviderUnavailableError) as err:
+                    failures.append((index + 1, err))
+            if output is None:
+                details = "; ".join(
+                    f"{position}: {err}" for position, err in failures
+                )
                 raise ExtractionError(
                     ExtractionErrorKind.LLM_FAILED,
-                    f"LLM call failed on both the primary and the fallback "
-                    f"model: {exc}; fallback: {fallback_exc}",
-                ) from fallback_exc
+                    f"LLM call failed on the primary and all fallback "
+                    f"attempts ({details})",
+                ) from failures[-1][1]
         except LLMInvalidResponseError as exc:
             raw_items = exc.raw.get("items") if isinstance(exc.raw, dict) else None
             if isinstance(raw_items, list):
