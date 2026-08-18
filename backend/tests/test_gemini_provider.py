@@ -42,6 +42,7 @@ from tests.test_extraction_failover import (
     extraction_json,
     make_service,
 )
+from tests.test_nvidia_provider import StubNvidiaClient
 
 TEST_KEY = "AIza-leak-test-gemini-1234567890"
 
@@ -316,4 +317,49 @@ class TestGeminiFallbackChain:
         ]
         assert all(
             c.timeout_seconds == 30.0 for c in StubGeminiClient.instances
+        )
+
+
+class TestMixedGeminiNvidiaChain:
+    """Gemini primary with an explicit NVIDIA fallback (cross-provider)."""
+
+    def enable_mixed(self, monkeypatch) -> None:
+        monkeypatch.setattr(settings, "llm_provider", "gemini")
+        monkeypatch.setattr(settings, "GEMINI_API_KEY", TEST_KEY)
+        monkeypatch.setattr(settings, "llm_fallback_model", "nvidia/nemotron-fb")
+        monkeypatch.setattr(settings, "llm_fallback_provider", "nvidia")
+        monkeypatch.setattr(settings, "llm_fallback_model_2", "gemini-flash-lite")
+        monkeypatch.setattr(settings, "llm_fallback_provider_2", "")  # -> primary
+        monkeypatch.setattr(settings, "llm_fallback_timeout_seconds", 30.0)
+        monkeypatch.setattr(settings, "llm_fallback_timeout_seconds_2", None)
+        monkeypatch.setattr(settings, "NVIDIA_NIM_API_KEY", "nvapi-test")
+        StubGeminiClient.instances.clear()
+        StubNvidiaClient.instances.clear()
+        monkeypatch.setattr(enrichment_module, "GeminiClient", StubGeminiClient)
+        monkeypatch.setattr(enrichment_module, "NvidiaClient", StubNvidiaClient)
+
+    def test_gemini_primary_with_nvidia_fallback(self, monkeypatch):
+        self.enable_mixed(monkeypatch)
+        result = make_service(
+            PipelineLLM(extraction=extraction_json(), description=DESCRIPTIONS_JSON)
+        ).run(default_request())
+
+        statuses = {s.stage: s.status for s in result.stages}
+        assert statuses[enrichment_module.StageName.DESCRIPTION] == (
+            enrichment_module.StageStatus.COMPLETED
+        )
+        assert result.processing.status.value == "completed"
+        # Extraction chain: nvidia fallback + gemini-lite retry; same again
+        # for the description stage.
+        assert [c.model for c in StubNvidiaClient.instances] == [
+            "nvidia/nemotron-fb",
+            "nvidia/nemotron-fb",
+        ]
+        assert [c.model for c in StubGeminiClient.instances] == [
+            "gemini-flash-lite",
+            "gemini-flash-lite",
+        ]
+        assert all(
+            c.timeout_seconds == 30.0
+            for c in StubNvidiaClient.instances + StubGeminiClient.instances
         )

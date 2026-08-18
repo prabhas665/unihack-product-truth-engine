@@ -185,6 +185,7 @@ class DescriptionsService:
         attributes: dict[str, AttributeValue],
         quotes: list[str] | None = None,
         out_reasons: list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> Descriptions:
         """Generate all variants; raises the typed LLM errors on failure.
 
@@ -203,6 +204,7 @@ class DescriptionsService:
                         identity, attributes, quotes or []
                     ),
                     output_schema=GeneratedDescriptions,
+                    timeout_seconds=timeout_seconds,
                 )
             )
         except LLMInvalidResponseError as exc:

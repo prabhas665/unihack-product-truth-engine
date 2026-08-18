@@ -24,15 +24,22 @@ class Settings(BaseSettings):
     # Optional fallback models for EXTRACTION ONLY (Step LLM-8): used only
     # when the primary LLM call times out or is unavailable, tried in
     # order. Empty = that fallback is skipped (current behavior when both
-    # are empty). Each fallback always uses the primary OpenRouter
-    # configuration/key with a different model id.
+    # are empty). Each fallback reuses the primary provider configuration
+    # (same key and base URL) with a different model id, unless
+    # LLM_FALLBACK_PROVIDER (or _2) names a different registered provider
+    # (e.g. "nvidia"): that provider's own key/base URL are then used, so a
+    # mixed chain like "gemini primary -> nvidia fallback" is possible.
     llm_fallback_model: str = ""
+    # Provider name for the first fallback; empty = the primary provider.
+    llm_fallback_provider: str = ""
     # Per-attempt timeout for the first fallback model; None = reuse
     # LLM_TIMEOUT_SECONDS.
     llm_fallback_timeout_seconds: float | None = None
     # Second ordered fallback model for extraction (attempted only when
     # the primary AND the first fallback both time out or are unavailable).
     llm_fallback_model_2: str = ""
+    # Provider name for the second fallback; empty = the primary provider.
+    llm_fallback_provider_2: str = ""
     # Per-attempt timeout for the second fallback model; None = reuse
     # LLM_FALLBACK_TIMEOUT_SECONDS, then LLM_TIMEOUT_SECONDS.
     llm_fallback_timeout_seconds_2: float | None = None

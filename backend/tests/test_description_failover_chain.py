@@ -107,6 +107,48 @@ def run_description(description: str | Exception):
     return description_service(description).run(default_request())
 
 
+class TestPerAttemptTimeout:
+    def test_generate_forwards_per_attempt_timeout(self):
+        """Each fallback attempt gets its own wall-clock timeout, not the
+        primary's (NVIDIA is slow and needs the longer bound)."""
+        from app.core.domain import AttributeValue, ProductIdentity
+        from app.descriptions.service import DescriptionsService
+        from app.llm import LLMClient
+
+        captured: dict = {}
+
+        class TimeoutProbe(LLMClient):
+            provider = "fake"
+
+            def _complete(
+                self,
+                prompt: str,
+                *,
+                system_prompt: str = "",
+                temperature: float | None = None,
+                timeout_seconds: float | None = None,
+            ) -> str:
+                return DESCRIPTIONS_JSON
+
+            def structured_completion(self, request):
+                captured["timeout"] = request.timeout_seconds
+                return super().structured_completion(request)
+
+        service = DescriptionsService(TimeoutProbe())
+        service.generate(
+            identity=ProductIdentity(mpn="ACME-1000"),
+            attributes={
+                "Material": AttributeValue(
+                    name="Material",
+                    raw_value="aluminum",
+                    value="aluminum",
+                )
+            },
+            timeout_seconds=123.0,
+        )
+        assert captured["timeout"] == 123.0
+
+
 class TestPrimarySucceeds:
     def test_fallbacks_built_but_never_called(self, monkeypatch):
         enable_chain_fallback(monkeypatch)

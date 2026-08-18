@@ -33,6 +33,8 @@ _OFFLINE_KEYS = {
     "llm_api_key": "",
     "llm_fallback_model": "",
     "llm_fallback_model_2": "",
+    "llm_fallback_provider": "",
+    "llm_fallback_provider_2": "",
     "GROQ_API_KEY": "",
     "search_provider_api_key": "",
     "GEMINI_API_KEY": "",

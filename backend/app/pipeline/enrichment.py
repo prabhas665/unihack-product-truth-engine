@@ -116,15 +116,17 @@ DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter tim
 EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
 
 
-def _build_fallback_client(model: str, timeout: float) -> LLMClient:
-    """Build one fallback client for the currently configured provider.
+def _build_fallback_client(model: str, timeout: float, provider: str = "") -> LLMClient:
+    """Build one fallback client for a registered provider.
 
-    Falls back with the SAME provider as the primary (same key/base URL,
-    different model id) so a throttled model never drags the provider
-    choice with it. ``openrouter`` (and the legacy empty provider name)
-    is the default; ``gemini`` and ``deepseek`` build their own adapters.
+    ``provider`` defaults to the currently configured primary provider. The
+    fallback uses the SAME key/base URL as that provider (Gemini, NVIDIA,
+    DeepSeek or OpenRouter) with a different model id, so a throttled model
+    never drags the provider choice with it, and a mixed chain such as
+    "gemini primary -> nvidia fallback" is possible. ``openrouter`` (and the
+    legacy empty provider name) is the default branch.
     """
-    provider = (settings.llm_provider or "").strip()
+    provider = (provider or settings.llm_provider or "").strip()
     if provider == "gemini":
         return GeminiClient(
             api_key=settings.GEMINI_API_KEY,
@@ -158,17 +160,19 @@ def _build_fallback_clients(reasons: list[str], review_label: str) -> list[LLMCl
     """Build the ordered LLM fallback client chain (Step LLM-8).
 
     Disabled unless LLM_FALLBACK_MODEL is set. Fallbacks are tried in
-    order (LLM_FALLBACK_MODEL, then LLM_FALLBACK_MODEL_2) and always reuse
-    the primary provider configuration (same key and base URL) with a
-    different model id. ``review_label`` names the pipeline stage in the
-    review reason (e.g. "extraction", "description"). Returns [] (failover
-    disabled) when the env vars are empty or construction fails - a review
-    reason is appended instead of crashing the run.
+    order (LLM_FALLBACK_MODEL, then LLM_FALLBACK_MODEL_2). Each fallback
+    uses its own provider: LLM_FALLBACK_PROVIDER (or _2) when set, else the
+    primary provider - so a mixed chain like "gemini primary -> nvidia
+    fallback" is possible while defaulting to same-provider behavior.
+    ``review_label`` names the pipeline stage in the review reason (e.g.
+    "extraction", "description"). Returns [] (failover disabled) when the
+    env vars are empty or construction fails - a review reason is appended
+    instead of crashing the run.
     """
     clients: list[LLMClient] = []
-    for model_attr, timeout_attr in (
-        ("llm_fallback_model", "llm_fallback_timeout_seconds"),
-        ("llm_fallback_model_2", "llm_fallback_timeout_seconds_2"),
+    for model_attr, timeout_attr, provider_attr in (
+        ("llm_fallback_model", "llm_fallback_timeout_seconds", "llm_fallback_provider"),
+        ("llm_fallback_model_2", "llm_fallback_timeout_seconds_2", "llm_fallback_provider_2"),
     ):
         model = (getattr(settings, model_attr) or "").strip()
         if not model:
@@ -179,7 +183,9 @@ def _build_fallback_clients(reasons: list[str], review_label: str) -> list[LLMCl
         if timeout is None:
             timeout = settings.llm_timeout_seconds
         try:
-            clients.append(_build_fallback_client(model, timeout))
+            clients.append(
+                _build_fallback_client(model, timeout, getattr(settings, provider_attr))
+            )
         except LLMConfigurationError as exc:
             reasons.append(f"{review_label} fallback model not configured: {exc}")
     return clients
@@ -1029,12 +1035,15 @@ class EnrichmentService:
             [record.text for record in usable if record.text.strip()]
         )
 
-        def generate_with(current_client: LLMClient) -> Descriptions:
+        def generate_with(
+            current_client: LLMClient, timeout: float | None = None
+        ) -> Descriptions:
             return DescriptionsService(current_client).generate(
                 identity=identity,
                 attributes=attributes,
                 quotes=quotes,
                 out_reasons=reasons,
+                timeout_seconds=timeout,
             )
 
         fallback_clients = _build_fallback_clients(reasons, "description")
@@ -1063,8 +1072,17 @@ class EnrichmentService:
             failures: list[tuple[int, LLMError]] = [(0, exc)]
             descriptions = None
             for index, fallback in enumerate(fallback_clients):
+                timeout = (
+                    settings.llm_fallback_timeout_seconds_2
+                    if index == 1
+                    else settings.llm_fallback_timeout_seconds
+                )
+                if timeout is None:
+                    timeout = settings.llm_fallback_timeout_seconds
+                if timeout is None:
+                    timeout = settings.llm_timeout_seconds
                 try:
-                    descriptions = generate_with(fallback)
+                    descriptions = generate_with(fallback, timeout)
                     break
                 except (LLMTimeoutError, LLMProviderUnavailableError) as err:
                     failures.append((index + 1, err))
