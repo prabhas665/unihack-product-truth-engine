@@ -21,17 +21,22 @@ from app.db.migration import run_migrations
 from app.main import app
 
 # Settings attributes (case-sensitive; pydantic-settings field names).
-# Provider *selection* for discovery is forced to the empty registry so the
-# default (no source_url) path yields zero candidates deterministically and
-# never builds a real search provider. LLM provider selection is left as-is;
-# its key is cleared so get_client() degrades gracefully instead of calling
-# the network.
+# Provider *selection* is forced to neutral values so tests never depend on
+# whatever backend/.env currently has (e.g. LLM_PROVIDER=nvidia after a live
+# run): discovery uses the empty registry (zero candidates deterministically)
+# and the LLM layer uses the legacy default branch whose key is cleared, so
+# get_client() degrades gracefully instead of calling the network. Tests that
+# exercise a specific provider set the selection + key themselves.
 _OFFLINE_KEYS = {
     "discovery_provider": "",
+    "llm_provider": "",
     "llm_api_key": "",
+    "llm_fallback_model": "",
+    "llm_fallback_model_2": "",
     "GROQ_API_KEY": "",
     "search_provider_api_key": "",
     "GEMINI_API_KEY": "",
+    "NVIDIA_NIM_API_KEY": "",
 }
 
 

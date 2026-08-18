@@ -91,6 +91,20 @@ class Settings(BaseSettings):
     # Maximum number of web_search results to surface per query
     GROQ_RESULTS_LIMIT: int = 10
 
+    # --- NVIDIA NIM LLM provider (LLM_PROVIDER=nvidia) ---
+    # OpenAI-compatible chat/completions API (build.nvidia.com). Set
+    # LLM_PROVIDER=nvidia to route extraction/description LLM calls through
+    # NVIDIA NIM. A missing NVIDIA_NIM_API_KEY surfaces as a typed
+    # LLMConfigurationError at call time, never at startup.
+    NVIDIA_NIM_API_KEY: str = ""
+    # Model id served by the NIM endpoint; "nvidia/nemotron-3.5-lightning-30b-a3b"
+    # is the fast free-tier default. Set NVIDIA_MODEL in backend/.env to override.
+    NVIDIA_MODEL: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    # Base URL for the OpenAI-compatible chat/completions endpoint.
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com"
+    # Request timeout in seconds
+    NVIDIA_TIMEOUT_SECONDS: float = 30.0
+
     # Evidence retrieval limits (see app/sources/retrieval/limits.py).
     retrieval_timeout_seconds: float = 20.0
     retrieval_max_bytes: int = 5_000_000  # HTML responses

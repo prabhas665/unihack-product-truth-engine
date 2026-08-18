@@ -29,6 +29,7 @@ from app.llm.types import (
 from app.llm.providers.fake import FakeLLMClient
 from app.llm.providers.deepseek import DeepSeekClient
 from app.llm.providers.gemini import GeminiClient
+from app.llm.providers.nvidia import NvidiaClient
 from app.llm.providers.openrouter import OpenRouterClient
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "LLMProviderUnavailableError",
     "LLMRequest",
     "LLMTimeoutError",
+    "NvidiaClient",
     "OpenRouterClient",
     "StructuredCompletionRequest",
     "StructuredRequest",

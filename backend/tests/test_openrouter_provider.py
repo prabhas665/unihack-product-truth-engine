@@ -81,6 +81,7 @@ class TestRegistration:
             "fake",
             "deepseek",
             "gemini",
+            "nvidia",
             "openrouter",
         }
 

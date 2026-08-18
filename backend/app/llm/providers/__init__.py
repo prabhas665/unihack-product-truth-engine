@@ -15,9 +15,11 @@ from app.llm.base import register_provider
 from app.llm.providers.deepseek import DeepSeekClient
 from app.llm.providers.fake import FakeLLMClient
 from app.llm.providers.gemini import GeminiClient
+from app.llm.providers.nvidia import NvidiaClient
 from app.llm.providers.openrouter import OpenRouterClient
 
 register_provider("fake", FakeLLMClient)
 register_provider("deepseek", DeepSeekClient.from_settings)
 register_provider("gemini", GeminiClient.from_settings)
+register_provider("nvidia", NvidiaClient.from_settings)
 register_provider("openrouter", OpenRouterClient.from_settings)

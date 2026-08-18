@@ -880,14 +880,13 @@ class TestProviderSelection:
 
 
 class TestLlmProviderUntouched:
-    def test_llm_provider_remains_openrouter(self, monkeypatch):
+    def test_llm_provider_not_mutated_by_groq(self, monkeypatch):
         original = settings.llm_provider
         monkeypatch.setattr(settings, "discovery_provider", "groq")
         monkeypatch.setattr(settings, "GROQ_API_KEY", "secret")
         # Building the groq provider must not mutate LLM settings.
         providers_from_settings()
         assert settings.llm_provider == original
-        assert settings.llm_provider == "openrouter"
 
     def test_groq_provider_module_ignores_llm_settings(self):
         # The groq module imports from search/errors/ranking, never from llm/.

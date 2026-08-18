@@ -34,6 +34,9 @@ def llm_health() -> LLMHealthResponse:
     if provider == "gemini":
         key_configured = bool((settings.GEMINI_API_KEY or "").strip())
         model = settings.GEMINI_MODEL or "(provider default)"
+    if provider == "nvidia":
+        key_configured = bool((settings.NVIDIA_NIM_API_KEY or "").strip())
+        model = settings.NVIDIA_MODEL or "(provider default)"
     result = LLMHealthResponse(
         provider=provider,
         model=model,
@@ -49,7 +52,10 @@ def llm_health() -> LLMHealthResponse:
     )
     if not result.key_configured:
         result.error = (
-            "GEMINI_API_KEY is not set" if provider == "gemini"
+            "GEMINI_API_KEY is not set"
+            if provider == "gemini"
+            else "NVIDIA_NIM_API_KEY is not set"
+            if provider == "nvidia"
             else "LLM_API_KEY is not set"
         )
         return result

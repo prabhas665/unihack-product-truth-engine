@@ -75,6 +75,7 @@ from app.llm import (
 )
 from app.llm.providers.deepseek import DeepSeekClient
 from app.llm.providers.gemini import GeminiClient
+from app.llm.providers.nvidia import NvidiaClient
 from app.llm.providers.openrouter import OpenRouterClient
 from app.sources.candidates import SourceCandidate
 from app.sources.discovery import (
@@ -129,6 +130,13 @@ def _build_fallback_client(model: str, timeout: float) -> LLMClient:
             api_key=settings.GEMINI_API_KEY,
             model=model,
             base_url=settings.GEMINI_BASE_URL,
+            timeout_seconds=timeout,
+        )
+    if provider == "nvidia":
+        return NvidiaClient(
+            api_key=settings.NVIDIA_NIM_API_KEY,
+            model=model,
+            base_url=settings.NVIDIA_BASE_URL,
             timeout_seconds=timeout,
         )
     if provider == "deepseek":
