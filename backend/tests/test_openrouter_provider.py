@@ -76,8 +76,13 @@ class TestRegistration:
         assert isinstance(client, OpenRouterClient)
         assert client.provider == "openrouter"
 
-    def test_registry_contains_all_three_providers(self):
-        assert set(PROVIDER_FACTORIES) == {"fake", "deepseek", "openrouter"}
+    def test_registry_contains_all_providers(self):
+        assert set(PROVIDER_FACTORIES) == {
+            "fake",
+            "deepseek",
+            "gemini",
+            "openrouter",
+        }
 
 
 # ------------------------------------------------------------------ payload --

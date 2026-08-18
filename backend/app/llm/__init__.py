@@ -28,6 +28,7 @@ from app.llm.types import (
 )
 from app.llm.providers.fake import FakeLLMClient
 from app.llm.providers.deepseek import DeepSeekClient
+from app.llm.providers.gemini import GeminiClient
 from app.llm.providers.openrouter import OpenRouterClient
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "ExtractedAttributes",
     "ExtractionRequest",
     "FakeLLMClient",
+    "GeminiClient",
     "GeneratedDescription",
     "LLMClient",
     "LLMConfigurationError",

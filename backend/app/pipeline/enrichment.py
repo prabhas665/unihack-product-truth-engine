@@ -73,6 +73,8 @@ from app.llm import (
     LLMTimeoutError,
     get_client,
 )
+from app.llm.providers.deepseek import DeepSeekClient
+from app.llm.providers.gemini import GeminiClient
 from app.llm.providers.openrouter import OpenRouterClient
 from app.sources.candidates import SourceCandidate
 from app.sources.discovery import (
@@ -113,12 +115,43 @@ DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter tim
 EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
 
 
+def _build_fallback_client(model: str, timeout: float) -> LLMClient:
+    """Build one fallback client for the currently configured provider.
+
+    Falls back with the SAME provider as the primary (same key/base URL,
+    different model id) so a throttled model never drags the provider
+    choice with it. ``openrouter`` (and the legacy empty provider name)
+    is the default; ``gemini`` and ``deepseek`` build their own adapters.
+    """
+    provider = (settings.llm_provider or "").strip()
+    if provider == "gemini":
+        return GeminiClient(
+            api_key=settings.GEMINI_API_KEY,
+            model=model,
+            base_url=settings.GEMINI_BASE_URL,
+            timeout_seconds=timeout,
+        )
+    if provider == "deepseek":
+        return DeepSeekClient(
+            api_key=settings.llm_api_key,
+            model=model,
+            base_url=settings.llm_base_url,
+            timeout_seconds=timeout,
+        )
+    return OpenRouterClient(
+        api_key=settings.llm_api_key,
+        model=model,
+        base_url=settings.llm_base_url,
+        timeout_seconds=timeout,
+    )
+
+
 def _build_fallback_clients(reasons: list[str], review_label: str) -> list[LLMClient]:
     """Build the ordered LLM fallback client chain (Step LLM-8).
 
     Disabled unless LLM_FALLBACK_MODEL is set. Fallbacks are tried in
     order (LLM_FALLBACK_MODEL, then LLM_FALLBACK_MODEL_2) and always reuse
-    the primary OpenRouter configuration (same key and base URL) with a
+    the primary provider configuration (same key and base URL) with a
     different model id. ``review_label`` names the pipeline stage in the
     review reason (e.g. "extraction", "description"). Returns [] (failover
     disabled) when the env vars are empty or construction fails - a review
@@ -138,14 +171,7 @@ def _build_fallback_clients(reasons: list[str], review_label: str) -> list[LLMCl
         if timeout is None:
             timeout = settings.llm_timeout_seconds
         try:
-            clients.append(
-                OpenRouterClient(
-                    api_key=settings.llm_api_key,
-                    model=model,
-                    base_url=settings.llm_base_url,
-                    timeout_seconds=timeout,
-                )
-            )
+            clients.append(_build_fallback_client(model, timeout))
         except LLMConfigurationError as exc:
             reasons.append(f"{review_label} fallback model not configured: {exc}")
     return clients

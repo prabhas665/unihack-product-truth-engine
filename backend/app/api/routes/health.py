@@ -26,11 +26,17 @@ def llm_health() -> LLMHealthResponse:
 
     Makes ONE tiny chat/completions call with the configured provider and
     reports the outcome. Useful for ops: if this returns 200, the deployed
-    LLM_API_KEY is valid and extraction will authenticate.
+    API key is valid and extraction will authenticate.
     """
+    provider = settings.llm_provider or "unset"
+    key_configured = bool((settings.llm_api_key or "").strip())
+    model = settings.llm_model or "(provider default)"
+    if provider == "gemini":
+        key_configured = bool((settings.GEMINI_API_KEY or "").strip())
+        model = settings.GEMINI_MODEL or "(provider default)"
     result = LLMHealthResponse(
-        provider=settings.llm_provider or "unset",
-        model=settings.llm_model or "(provider default)",
+        provider=provider,
+        model=model,
         fallback_models=[
             model
             for model in (
@@ -39,10 +45,13 @@ def llm_health() -> LLMHealthResponse:
             )
             if model
         ],
-        key_configured=bool((settings.llm_api_key or "").strip()),
+        key_configured=key_configured,
     )
     if not result.key_configured:
-        result.error = "LLM_API_KEY is not set"
+        result.error = (
+            "GEMINI_API_KEY is not set" if provider == "gemini"
+            else "LLM_API_KEY is not set"
+        )
         return result
     try:
         client = get_client()
