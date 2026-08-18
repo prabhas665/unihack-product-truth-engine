@@ -441,7 +441,13 @@ class TestPipelineThreeModelChain:
         assert result.processing.status == ProcessingStatus.COMPLETED
         assert result.extraction is not None
         assert len(result.extraction.attributes) == 2
-        assert len(StubOpenRouterClient.instances) == 2
+        # The extraction chain is the first two constructed clients; the
+        # description stage now builds its own two-fallback chain too.
+        assert len(StubOpenRouterClient.instances) == 4
+        assert [c.model for c in StubOpenRouterClient.instances[:2]] == [
+            "fallback/model-1:free",
+            "fallback/model-2:free",
+        ]
         assert len(StubOpenRouterClient.inner.calls) == 1
 
     def test_chain_disabled_when_both_models_empty(self, monkeypatch):

@@ -69,6 +69,7 @@ from app.llm import (
     LLMClient,
     LLMConfigurationError,
     LLMError,
+    LLMProviderUnavailableError,
     LLMTimeoutError,
     get_client,
 )
@@ -112,17 +113,16 @@ DESCRIPTION_TIMEOUT_REASON = "Description generation unavailable: OpenRouter tim
 EXTRACTION_TIMEOUT_REASON = "Extraction unavailable: LLM call timed out."
 
 
-def _build_extraction_fallback_clients(
-    reasons: list[str],
-) -> list[LLMClient]:
-    """Build the ordered extraction-only fallback client chain (Step LLM-8).
+def _build_fallback_clients(reasons: list[str], review_label: str) -> list[LLMClient]:
+    """Build the ordered LLM fallback client chain (Step LLM-8).
 
     Disabled unless LLM_FALLBACK_MODEL is set. Fallbacks are tried in
     order (LLM_FALLBACK_MODEL, then LLM_FALLBACK_MODEL_2) and always reuse
     the primary OpenRouter configuration (same key and base URL) with a
-    different model id. Returns [] (failover disabled) when the env vars are
-    empty or construction fails - a review reason is appended instead of
-    crashing the run.
+    different model id. ``review_label`` names the pipeline stage in the
+    review reason (e.g. "extraction", "description"). Returns [] (failover
+    disabled) when the env vars are empty or construction fails - a review
+    reason is appended instead of crashing the run.
     """
     clients: list[LLMClient] = []
     for model_attr, timeout_attr in (
@@ -147,7 +147,7 @@ def _build_extraction_fallback_clients(
                 )
             )
         except LLMConfigurationError as exc:
-            reasons.append(f"extraction fallback model not configured: {exc}")
+            reasons.append(f"{review_label} fallback model not configured: {exc}")
     return clients
 
 
@@ -900,7 +900,7 @@ class EnrichmentService:
                 reasons.append(f"extraction failed: {exc}")
                 return None, note, reasons, None
 
-        fallback_clients = _build_extraction_fallback_clients(reasons)
+        fallback_clients = _build_fallback_clients(reasons, "extraction")
         service = ExtractionService(
             client,
             fallback_clients=fallback_clients,
@@ -954,15 +954,20 @@ class EnrichmentService:
         """Generate description variants from the validated attributes.
 
         Uses ONLY the extracted/validated facts; a missing LLM or a provider
-        failure becomes a FAILED stage with a review reason - never an
-        exception and never fabricated copy. Generated copy passes through
-        the deterministic grounding guard (app.descriptions.grounding): any
-        unsupported factual claim (certification, warranty, dimensions,
-        material, performance, compatibility, accessory) not backed by the
-        identity/attributes/quotes is dropped and its field blanked. The
-        returned StageStatus hint tells the caller how to mark the stage:
-        NEEDS_REVIEW when only part of the copy was dropped, FAILED when the
-        guard left nothing at all.
+        failure becomes a NEEDS_REVIEW stage with a review reason - never an
+        exception and never fabricated copy. A timeout or provider
+        unavailability is retried against the ordered fallback models (same
+        rule as extraction); when every attempt fails the stage stays
+        NEEDS_REVIEW (blank fields, run survives). Schema-invalid output
+        never triggers a failover and becomes a FAILED stage. Generated copy
+        passes through the deterministic grounding guard
+        (app.descriptions.grounding): any unsupported factual claim
+        (certification, warranty, dimensions, material, performance,
+        compatibility, accessory) not backed by the identity/attributes/
+        quotes is dropped and its field blanked. The returned StageStatus
+        hint tells the caller how to mark the stage: NEEDS_REVIEW when only
+        part of the copy was dropped, FAILED when the guard left nothing at
+        all.
         """
         reasons: list[str] = []
         if not validated:
@@ -989,20 +994,66 @@ class EnrichmentService:
         quotes = service.evidence_quotes(
             [record.text for record in usable if record.text.strip()]
         )
-        try:
-            descriptions = service.generate(
+
+        def generate_with(current_client: LLMClient) -> Descriptions:
+            return DescriptionsService(current_client).generate(
                 identity=identity,
                 attributes=attributes,
                 quotes=quotes,
                 out_reasons=reasons,
             )
-        except LLMTimeoutError as exc:
-            # Hard timeout: never fabricate copy and never fail the run.
-            # Leave descriptions blank and mark the stage NEEDS_REVIEW so the
-            # extracted attributes/evidence and 252-column delivery survive.
-            note = DESCRIPTION_TIMEOUT_REASON
-            reasons.append(DESCRIPTION_TIMEOUT_REASON)
-            return None, note, reasons, StageStatus.NEEDS_REVIEW
+
+        fallback_clients = _build_fallback_clients(reasons, "description")
+        try:
+            descriptions = generate_with(client)
+        except (LLMTimeoutError, LLMProviderUnavailableError) as exc:
+            if not fallback_clients:
+                if isinstance(exc, LLMTimeoutError):
+                    # Hard timeout: never fabricate copy and never fail the
+                    # run. Leave descriptions blank and mark the stage
+                    # NEEDS_REVIEW so the extracted attributes/evidence and
+                    # 252-column delivery survive.
+                    note = DESCRIPTION_TIMEOUT_REASON
+                    reasons.append(DESCRIPTION_TIMEOUT_REASON)
+                    return None, note, reasons, StageStatus.NEEDS_REVIEW
+                note = f"failed ({type(exc).__name__}): {exc}"
+                reasons.append(f"description generation failed: {exc}")
+                return None, note, reasons, None
+            # Ordered failover (same rule as extraction): a timeout or
+            # provider-unavailability on one model is retried on the next,
+            # each attempt with its own bounded timeout. Schema-invalid
+            # output never triggers a failover. When every attempt fails
+            # the stage becomes NEEDS_REVIEW - never FAILED - so the run,
+            # evidence and 252-column delivery survive with blank
+            # description fields (nothing is fabricated).
+            failures: list[tuple[int, LLMError]] = [(0, exc)]
+            descriptions = None
+            for index, fallback in enumerate(fallback_clients):
+                try:
+                    descriptions = generate_with(fallback)
+                    break
+                except (LLMTimeoutError, LLMProviderUnavailableError) as err:
+                    failures.append((index + 1, err))
+                except LLMError as err:
+                    # Schema-invalid (or any non-failover) output from a
+                    # fallback never triggers another model: surface it as
+                    # a failed stage instead of crashing the run.
+                    note = f"failed ({type(err).__name__}): {err}"
+                    reasons.append(f"description generation failed: {err}")
+                    return None, note, reasons, None
+            if descriptions is None:
+                details = "; ".join(
+                    f"{position}: {err}" for position, err in failures
+                )
+                note = f"failed ({type(failures[-1][1]).__name__}): {failures[-1][1]}"
+                reasons.append(
+                    f"description generation failed on the primary and all "
+                    f"fallback attempts ({details})"
+                )
+                if isinstance(failures[-1][1], LLMTimeoutError):
+                    note = DESCRIPTION_TIMEOUT_REASON
+                    reasons.append(DESCRIPTION_TIMEOUT_REASON)
+                return None, note, reasons, StageStatus.NEEDS_REVIEW
         except LLMError as exc:
             note = f"failed ({type(exc).__name__}): {exc}"
             reasons.append(f"description generation failed: {exc}")
