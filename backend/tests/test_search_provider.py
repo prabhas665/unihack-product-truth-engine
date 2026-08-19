@@ -538,6 +538,46 @@ class TestProviderSelection:
         assert result.candidates[0].domain == "acme-controls.example"
         assert result.candidates[0].status == CandidateStatus.ALLOWED
 
+    def test_comma_separated_returns_multiple_providers(self, monkeypatch):
+        monkeypatch.setattr(settings, "discovery_provider", "search,gemini")
+        monkeypatch.setattr(settings, "search_provider_api_key", "serper-key")
+        monkeypatch.setattr(settings, "GEMINI_API_KEY", "gemini-key")
+        providers = providers_from_settings()
+        assert len(providers) == 2
+        assert providers[0].name == "search"
+        assert providers[1].name == "gemini"
+
+    def test_comma_separated_preserves_order(self, monkeypatch):
+        monkeypatch.setattr(settings, "discovery_provider", "gemini,search")
+        monkeypatch.setattr(settings, "search_provider_api_key", "serper-key")
+        monkeypatch.setattr(settings, "GEMINI_API_KEY", "gemini-key")
+        providers = providers_from_settings()
+        assert len(providers) == 2
+        assert providers[0].name == "gemini"
+        assert providers[1].name == "search"
+
+    def test_comma_separated_deduplicates(self, monkeypatch):
+        monkeypatch.setattr(settings, "discovery_provider", "search,search")
+        monkeypatch.setattr(settings, "search_provider_api_key", "serper-key")
+        providers = providers_from_settings()
+        assert len(providers) == 1
+        assert providers[0].name == "search"
+
+    def test_comma_separated_strips_whitespace_and_empties(self, monkeypatch):
+        monkeypatch.setattr(settings, "discovery_provider", " search , , gemini ")
+        monkeypatch.setattr(settings, "search_provider_api_key", "serper-key")
+        monkeypatch.setattr(settings, "GEMINI_API_KEY", "gemini-key")
+        providers = providers_from_settings()
+        assert len(providers) == 2
+        assert providers[0].name == "search"
+        assert providers[1].name == "gemini"
+
+    def test_comma_separated_unknown_name_raises(self, monkeypatch):
+        monkeypatch.setattr(settings, "discovery_provider", "search,bogus")
+        monkeypatch.setattr(settings, "search_provider_api_key", "serper-key")
+        with pytest.raises(ProviderConfigurationError, match="unknown discovery provider"):
+            providers_from_settings()
+
 
 class TestProviderErrorInfo:
     def test_kind_mirrors_error_class(self):
