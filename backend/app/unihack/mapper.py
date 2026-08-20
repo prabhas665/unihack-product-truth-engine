@@ -322,7 +322,9 @@ class UniHackDeliveryMapper:
     ) -> None:
         fillable = {
             "PART_NUMBER": product.identity.mpn,
-            "SKU - MY_PART_NUMBER": product.identity.sku or "",
+            # The customer's own SKU for an item IS the supplied part number
+            # when no separate SKU was verified.
+            "SKU - MY_PART_NUMBER": product.identity.sku or product.identity.mpn,
             "MANUFACTURER_NAME": product.identity.verified_manufacturer,
             "BRAND_NAME": product.identity.verified_brand,
             "TRADE_NAME": product.identity.verified_trade_name,

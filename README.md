@@ -8,8 +8,11 @@ manufacturer sources, extracts product information, normalizes and validates it,
 attaches evidence, detects conflicts, computes confidence and quality scores,
 generates commerce-ready descriptions, and lets the user download the final result.
 
-> **Status: repository foundation only.** This is a clean, modular skeleton.
-> No product intelligence functionality is implemented yet, by design.
+> **Status: working end-to-end.** Evidence-based enrichment runs for any
+> part number with internet presence: discovery (Serper + Gemini), retrieval
+> (HTML/PDF, SSRF-guarded), extraction (Gemini, evidence-cited attributes),
+> validation, dedup, descriptions, and 252-column delivery CSV. 900+ offline
+> tests. Free-tier speed config: ~8-15 s per product.
 
 ## Architecture
 
@@ -20,16 +23,18 @@ frontend/ (React + Vite + TypeScript SPA)
 backend/  (FastAPI, Python 3.11)
    app/
      api/         REST routes: health, enrich, lookup, dashboard, batch,
-                  downloads
-     pipeline/    orchestration: discovery -> extraction -> normalization
-                  -> validation -> description (stage registry)
-     descriptions/ evidence-bound LLM description generation (Step 9)
-     sources/     source discovery (candidates, policy, deterministic ranking)
-                  + evidence retrieval (HTML/PDF fetchers, limits, security gates)
-     llm/         provider-agnostic LLM client (LLMClient + typed ops + registry)
-     validation/  LOV validation, UOM normalization, quality gates
+                  downloads, evaluation (token-guarded)
+     pipeline/    orchestration: identity -> discovery -> retrieval ->
+                  extraction -> validation -> merge -> description (stage registry)
+     descriptions/ evidence-bound LLM description generation
+     sources/     source discovery (Serper + Gemini providers, policy,
+                  deterministic ranking, two-pass recall) + evidence retrieval
+                  (HTML/PDF fetchers, limits, SSRF guard)
+     identity/    verified-brand registry + cross-check (backend/data/verified_brands.json)
+     llm/         provider-agnostic LLM client (LLMClient + typed ops + retry + registry)
+     validation/  LOV validation, UOM normalization, attribute merge/dedup
      db/          SQLAlchemy models + SQLite persistence (jobs, product records)
-     export/      Excel + JSON result downloads
+     unihack/     official CSV parser, 252-column delivery schema + mapper + writer
      core/        domain models (app.core.domain) and API schemas
 ```
 
@@ -108,6 +113,44 @@ pytest backend\tests
 No API key is needed: the LLM tests use the built-in offline `fake` provider
 (`LLM_PROVIDER=fake`) and canned responses. No test ever calls an external
 LLM API.
+
+## Deployment (Render)
+
+`render.yaml` deploys the full stack as one free-tier web service (FastAPI +
+committed frontend build) with a 1 GB persistent disk so the SQLite database
+and generated CSVs survive restarts. Steps:
+
+1. Push the repo; create a new Blueprint from `render.yaml` (or a Web Service
+   with the same build/start commands and env vars).
+2. In the service's **Environment** tab set the secrets (`sync: false` vars):
+   - `SEARCH_PROVIDER_API_KEY` - Serper key
+   - `GEMINI_API_KEY` - Google AI Studio key
+   - `NVIDIA_NIM_API_KEY` - NVIDIA NIM key (fallback)
+   - `EVALUATION_API_TOKEN` - any random string; gates `POST /api/evaluation/run`
+3. Manual Deploy.
+
+Production env vars (mirrored in `render.yaml`):
+
+| Env var | Value | Purpose |
+|---|---|---|
+| `DISCOVERY_PROVIDER` | `search,gemini` | Serper primary, Gemini grounding backup |
+| `LLM_PROVIDER` | `gemini` | primary extraction/description model |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | cheap + fast for free-tier throughput |
+| `LLM_FALLBACK_PROVIDER` | `nvidia` | first failover model |
+| `LLM_FALLBACK_MODEL_2` | `gemini-flash-latest` | second failover model (same provider unless `LLM_FALLBACK_PROVIDER_2` names one) |
+| `EXTRACTION_CONTEXT_BUDGET_CHARS` | `8000` | evidence budget per run (speed) |
+| `SEARCH_PROVIDER_RESULTS_LIMIT` | `6` | organic results per query (speed) |
+| `LLM_TIMEOUT_SECONDS` / `PIPELINE_RUN_DEADLINE_SECONDS` | `180` | bounded runs |
+| `DATA_DIR` / `DATABASE_URL` | `/var/data` / `sqlite:////var/data/unihack.db` | persistent disk |
+
+> **Deployment footgun:** never set `LLM_FALLBACK_PROVIDER_2` to an empty
+> string on Render - an empty value becomes the literal provider name and all
+> requests fail. Omit the variable (or set it to `gemini`).
+
+`EVALUATION_API_TOKEN` gates the harness endpoint that can read files and
+trigger paid live runs; without it that endpoint returns 403. The regular
+`/api/enrich` and `/api/batch` endpoints are public by design (the frontend
+calls them).
 
 ## LLM provider abstraction
 
@@ -719,9 +762,12 @@ download endpoint:
   fabrication, keeps 1:1 dataset alignment), a `failed` `ProductRecordModel`,
   and the remaining rows keep processing. Job status is exact: all
   completed / all failed / mixed or any needs_review -> needs_review.
-- **Collision-free filenames + CSV-before-commit cleanup**: every batch file
-  gets a UUID suffix; if the DB commit fails, the exact file created for that
-  run is removed before the 500 propagates - no orphan CSVs.
+- **Collision-free filenames + incremental crash-safe commit**: every batch
+  file gets a UUID suffix; each row is persisted (DB record + CSV line) the
+  moment it completes, so an interrupted run never loses finished rows. The
+  Job stays `running` (clearly unfinished); if a commit fails before ANY row
+  was persisted, the exact file created for that run is removed - no orphan
+  CSVs.
 - **Payload growth cap** (`BATCH_PAYLOAD_EVIDENCE_CAP_CHARS`, default 20 000):
   evidence text stored in the persisted payload is truncated per record;
   evidence IDs, URLs and every extracted attribute quote stay intact.
@@ -854,9 +900,9 @@ them with safe defaults). No Alembic.
 
 1. Load the official UniHack resources when they arrive and implement
    provider adapters (LOV / UOM / manufacturer-brand) behind the existing
-   interfaces. (Step 6A done: input parsing + 252-column delivery mapping +
-   delivery CSV writer against the real files; validation framework ready.)
-2. Exercise the description-generation stage (Step 9) with real provider
-   credentials and refine the copy against the official delivery templates.
-3. Optional: async batch processing with progress/job polling for full
-   1000-row runs, and Excel export of delivery files.
+   interfaces. Until then, Dept/Class/Fine/Classpath and official-verification
+   columns are left blank with "requires the official taxonomy" notes - never
+   fabricated.
+2. Full-dataset runs (the 1,000-row official CSV) through the batch endpoint,
+   and async batch with progress/job polling for long runs.
+3. Excel export of delivery files.

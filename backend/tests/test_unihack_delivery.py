@@ -147,6 +147,15 @@ def test_fillable_identity_columns_when_verified():
     assert not any("PART_NUMBER" in note for note in row.notes)
 
 
+def test_sku_column_falls_back_to_mpn():
+    product = ProductIntelligence(
+        identity=ProductIdentity(mpn="XLC02ZW", sku=None)
+    )
+    row = mapper.map(product)
+    assert row.values[schema.index_of("SKU - MY_PART_NUMBER")] == "XLC02ZW"
+    assert not any("SKU - MY_PART_NUMBER" in note for note in row.notes)
+
+
 def test_verified_identity_blank_when_unverified():
     product = ProductIntelligence(
         identity=ProductIdentity(

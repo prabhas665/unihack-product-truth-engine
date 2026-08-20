@@ -1,24 +1,29 @@
 # Render deployment manifest - UniHack Product Truth Engine
 # Single web service: FastAPI serves the API AND the prebuilt frontend
-# (frontend/dist) from the same origin, so the browser only ever talks to one
-# host and no CORS/frontend-config changes are required.
+# (frontend/dist) from the same origin.
 #
 # Build: only the Python backend is installed at deploy time; the frontend
-# build is committed (frontend/dist is un-ignored in .gitignore) so no Node
-# toolchain is needed on Render. Rebuild after frontend changes:
-#   npm --prefix frontend run build
+# build is committed (frontend/dist) so no Node toolchain is needed on Render.
 #
-# Secrets (LLM_API_KEY, GROQ_API_KEY) are NOT committed. Create them in the
-# Render dashboard (leave the values blank here); they are injected as env
-# vars at runtime and are never sent to the browser.
+# Secrets (API keys, the evaluation token) are NOT committed: keep the values
+# blank here and set them in the Render dashboard "Environment" tab; they are
+# injected at runtime and never sent to the browser. `sync: false` means
+# Render must not touch the value - set it once in the dashboard.
 #
-# IMPORTANT - RENDER FREE PLAN / EPHEMERAL STORAGE (no persistent disk):
-# This manifest targets the Render Free plan and intentionally uses NO
-# persistent disk. The SQLite database and any generated downloads/reports
-# live under /tmp, which is EPHEMERAL: they are wiped on every restart or
-# redeploy and recreated empty. This is expected for a demo - re-enrich any
-# MPN you need; the pipeline is fully re-runnable and needs no saved state.
-# Do NOT rely on anything written under /tmp surviving a restart.
+# PERSISTENT DISK: the free tier supports one 1 GB disk. Everything runtime
+# (SQLite DB, batch delivery CSVs, downloads) lives on the mount at /var/data
+# via DATA_DIR + DATABASE_URL, so data survives restarts and redeploys.
+#
+# PROVIDER STACK (free-tier speed tuning):
+#   - Discovery: Serper (SEARCH_PROVIDER_API_KEY) primary, Gemini search
+#     (GEMINI_API_KEY) backup, comma-separated DISCOVERY_PROVIDER=search,gemini.
+#   - LLM: Gemini (GEMINI_API_KEY) primary with the cheap flash-lite model;
+#     NVIDIA NIM as the first fallback (NVIDIA_NIM_API_KEY) and Gemini again
+#     as the second fallback model (LLM_FALLBACK_MODEL_2=gemini-flash-latest).
+#   - A 180 s LLM timeout with per-run 180 s deadline keeps runs bounded.
+#   - IMPORTANT: never set LLM_FALLBACK_PROVIDER_2 to an empty string on
+#     Render - an empty value becomes the literal provider name and breaks
+#     requests. Omit the variable entirely (or set it to "gemini").
 
 services:
   - type: web
@@ -30,29 +35,55 @@ services:
     buildCommand: pip install -r backend/requirements.txt
     startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
+    disk:
+      name: runtime-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: DATABASE_URL
-        value: sqlite:////tmp/unihack.db
+        value: sqlite:////var/data/unihack.db
       - key: DATA_DIR
-        value: /tmp
+        value: /var/data
       - key: FRONTEND_DIST_DIR
         value: ../frontend/dist
-      # Frontend uses no credentials, so "*" is safe here. For a stricter
-      # setup, replace with the exact Render static origin, e.g.
-      # https://product-truth-engine.onrender.com
       - key: CORS_ALLOWED_ORIGINS
         value: "*"
-      - key: LLM_PROVIDER
-        value: openrouter
-      - key: LLM_MODEL
-        sync: false
-      - key: LLM_API_KEY
-        sync: false
+      # ---- discovery -----------------------------------------------------
       - key: DISCOVERY_PROVIDER
-        value: groq
-      - key: GROQ_MODEL
-        value: groq/compound-mini
-      - key: GROQ_API_KEY
+        value: search,gemini
+      - key: SEARCH_PROVIDER_API_KEY
+        sync: false
+      - key: SEARCH_PROVIDER_RESULTS_LIMIT
+        value: "6"
+      - key: GEMINI_API_KEY
+        sync: false
+      # ---- LLM -----------------------------------------------------------
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      - key: LLM_TIMEOUT_SECONDS
+        value: "180"
+      - key: LLM_FALLBACK_PROVIDER
+        value: nvidia
+      - key: LLM_FALLBACK_MODEL
+        value: nvidia/nemotron-3.5-lightning-30b-a3b
+      - key: LLM_FALLBACK_TIMEOUT_SECONDS
+        value: "120"
+      - key: NVIDIA_NIM_API_KEY
+        sync: false
+      - key: LLM_FALLBACK_MODEL_2
+        value: gemini-flash-latest
+      # DO NOT add LLM_FALLBACK_PROVIDER_2 here (see header note).
+      # ---- pipeline ------------------------------------------------------
+      - key: EXTRACTION_CONTEXT_BUDGET_CHARS
+        value: "8000"
+      - key: PIPELINE_RUN_DEADLINE_SECONDS
+        value: "180"
+      - key: PRODUCT_CACHE_FRESHNESS_DAYS
+        value: "30"
+      # ---- eval endpoint auth (any random string; endpoint disabled when unset)
+      - key: EVALUATION_API_TOKEN
         sync: false
