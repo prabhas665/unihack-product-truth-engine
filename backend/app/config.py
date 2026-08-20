@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # LLM_FALLBACK_TIMEOUT_SECONDS, then LLM_TIMEOUT_SECONDS.
     llm_fallback_timeout_seconds_2: float | None = None
 
+    # Transient-failure retries with exponential backoff. A provider call
+    # that fails with a retryable error (rate limit, transient network) is
+    # retried up to this many ADDITIONAL times on the same provider before
+    # the failover chain is consulted. Base delay doubles per attempt.
+    llm_retry_attempts: int = 2
+    retry_base_delay_seconds: float = 1.0
+    # Additional attempts for a single discovery provider call (same policy).
+    discovery_retry_attempts: int = 1
+
+    # Hard wall-clock deadline for ONE pipeline run (seconds). When the
+    # deadline passes, LLM-bound stages (extraction/descriptions) are skipped
+    # with a NEEDS_REVIEW reason instead of starting a fresh paid call; the
+    # run still returns with the identity, evidence and delivery preserved.
+    pipeline_run_deadline_seconds: int = 180
+
     # Source discovery policy: comma-separated domain patterns (see
     # app/sources/policy.py). No UniHack data is hard-coded here; the
     # official manufacturer domain registry fills in later.
@@ -174,6 +189,12 @@ class Settings(BaseSettings):
     # older records are STALE and either flagged as such or re-enriched on
     # demand. Set to 0 to disable freshness (everything is treated as stale).
     product_cache_freshness_days: int = 30
+
+    # Bearer token required by POST /api/evaluation/run. When unset the
+    # endpoint is disabled (403): it reads arbitrary files, writes reports
+    # and can trigger paid live pipeline runs, so it must never be exposed
+    # without an explicit key.
+    evaluation_api_token: str = ""
 
 
     @property

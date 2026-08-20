@@ -15,9 +15,20 @@ import httpx
 
 from app.sources.retrieval.limits import RetrievalLimits
 from app.sources.retrieval.models import RetrievalError, RetrievalErrorKind
+from app.sources.retrieval.ssrf import assert_public_http_url
 
 
 _EXTRA_CA_PEM = Path(__file__).parent / "certs" / "godaddy-g2-intermediate.pem"
+
+
+def _ssrf_hook(resolver):
+    """httpx response hook: re-validate every hop's effective URL so DNS
+    rebinding / redirects to internal hosts are blocked too."""
+
+    def check(response: httpx.Response) -> None:
+        assert_public_http_url(str(response.url), resolver=resolver)
+
+    return check
 
 
 def _verified_verify_arg() -> ssl.SSLContext | None:
@@ -49,17 +60,26 @@ def download(
     limits: RetrievalLimits,
     max_bytes: int,
     transport: httpx.BaseTransport | None = None,
+    resolver=None,
 ) -> tuple[str, str, bytes]:
     """Return (content_type, final_url, body).
 
     `transport` is injected by tests (httpx.MockTransport) to keep the suite
-    fully offline; production uses the real network transport.
+    fully offline; production uses the real network transport. `resolver`
+    injects the SSRF hostname resolver (offline tests); production uses real
+    DNS. The SSRF guard runs whenever the real network path is used, or when
+    a resolver is explicitly supplied; every redirect hop is re-validated.
     """
+    guard_enabled = transport is None or resolver is not None
+    if guard_enabled:
+        assert_public_http_url(url, resolver=resolver)
     client_kwargs: dict = {
         "timeout": httpx.Timeout(limits.timeout_seconds),
         "follow_redirects": True,
         "headers": {"User-Agent": limits.user_agent},
     }
+    if guard_enabled:
+        client_kwargs["event_hooks"] = {"response": [_ssrf_hook(resolver)]}
     if transport is not None:
         client_kwargs["transport"] = transport
     else:

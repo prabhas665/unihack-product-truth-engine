@@ -86,3 +86,31 @@ class DeliveryCsvWriter:
                 )
             writer.writerow([escape_formula(value) for value in row.values])
         return buffer.getvalue()
+
+    def write_header(self, path: str | Path) -> None:
+        """Create (or truncate) the file and write the header row.
+
+        Paired with :meth:`append_row` for crash-safe incremental batches:
+        the header is written once up front, then each completed row is
+        appended as it finishes, so an interrupted run still leaves a
+        well-formed CSV with the rows that were actually persisted.
+        """
+        import csv
+
+        with Path(path).open("w", encoding="utf-8-sig", newline="") as handle:
+            csv.writer(handle).writerow(self.schema.headers)
+
+    def append_row(self, path: str | Path, row: DeliveryRow) -> None:
+        """Append ONE delivery row to an existing header-created file."""
+        import csv
+
+        if len(row.values) != self.schema.count:
+            raise DeliveryWriteError(
+                f"row has {len(row.values)} columns; expected "
+                f"{self.schema.count}"
+            )
+        # Plain utf-8 on append: utf-8-sig would re-emit the BOM mid-file.
+        with Path(path).open("a", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerow(
+                [escape_formula(value) for value in row.values]
+            )

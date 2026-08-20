@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -523,6 +523,12 @@ class EnrichmentService:
         review_reasons: list[str] = []
         errors: list[ProcessingError] = []
         started = utcnow()
+        deadline = started + timedelta(
+            seconds=max(1, int(settings.pipeline_run_deadline_seconds))
+        )
+
+        def deadline_exceeded() -> bool:
+            return utcnow() > deadline
 
         def mark(name: StageName, status: StageStatus, note: str = "") -> None:
             states[name] = StageState(stage=name, status=status, note=note)
@@ -678,14 +684,31 @@ class EnrichmentService:
             for reason in selection.dropped:
                 review_reasons.append(reason)
             mark(StageName.EXTRACTION, StageStatus.RUNNING)
-            extraction, extraction_note, extraction_reasons, extraction_hint = (
-                self._extract(
-                    discovery.product,
-                    input_row,
-                    extraction_evidence,
-                    review_reasons,
+            if deadline_exceeded():
+                note = "run deadline exceeded before extraction"
+                review_reasons.append(note)
+                extraction_note, extraction_reasons, extraction_hint = (
+                    note,
+                    [note],
+                    StageStatus.NEEDS_REVIEW,
                 )
-            )
+                extraction = None
+                mark(StageName.EXTRACTION, StageStatus.NEEDS_REVIEW, note)
+                mark(StageName.VALIDATION, StageStatus.RUNNING)
+                mark(
+                    StageName.VALIDATION,
+                    StageStatus.SKIPPED,
+                    "no extracted attributes",
+                )
+            else:
+                extraction, extraction_note, extraction_reasons, extraction_hint = (
+                    self._extract(
+                        discovery.product,
+                        input_row,
+                        extraction_evidence,
+                        review_reasons,
+                    )
+                )
             review_reasons.extend(extraction_reasons)
             if extraction is not None:
                 mark(StageName.EXTRACTION, StageStatus.COMPLETED, extraction_note)
@@ -734,13 +757,19 @@ class EnrichmentService:
             out_reasons=review_reasons,
         )
         mark(StageName.DESCRIPTION, StageStatus.RUNNING)
-        descriptions, desc_note, desc_reasons, desc_hint = (
-            self._generate_descriptions(
-                discovery.product,
-                validated,
-                extraction_evidence,
+        if deadline_exceeded():
+            desc_note = "run deadline exceeded before description generation"
+            desc_reasons = [desc_note]
+            desc_hint = StageStatus.NEEDS_REVIEW
+            descriptions = None
+        else:
+            descriptions, desc_note, desc_reasons, desc_hint = (
+                self._generate_descriptions(
+                    discovery.product,
+                    validated,
+                    extraction_evidence,
+                )
             )
-        )
         review_reasons.extend(desc_reasons)
         if descriptions is not None:
             if desc_hint is not None:

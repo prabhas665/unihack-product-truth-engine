@@ -263,99 +263,111 @@ def run_batch(
 
     service = service_factory()
     schema = _delivery_schema()
-    writer = DeliveryCsvWriter(schema)
 
-    delivery_rows: list[DeliveryRow] = []
-    reports: list[BatchRowResult] = []
-    # (dataset row, enrichment result or None, persisted payload or None)
-    outcomes: list[tuple[object, EnrichmentResult | None, str | None]] = []
-    status_counts: dict[str, int] = {}
-
-    for row in selected:
-        try:
-            result = service.run(EnrichmentRequest.from_row(row))
-        except Exception as exc:  # noqa: BLE001 - row isolation: keep going
-            # Never expose args, stack traces or secrets; the exception class
-            # name alone is enough to route a human to the server logs.
-            reason = f"unexpected row failure: {type(exc).__name__}"
-            status = ProcessingStatus.FAILED.value
-            outcomes.append((row, None, json.dumps(
-                {"row_error": {"type": type(exc).__name__, "reason": reason}}
-            )))
-            delivery_rows.append(_blank_delivery_row(schema))
-            reports.append(
-                BatchRowResult(
-                    row_id=row.row_id,
-                    mfg_part_num=row.mfg_part_num_value or "",
-                    processing_status=status,
-                    delivery_columns=0,
-                    review_reasons=[reason],
-                )
-            )
-            status_counts[status] = status_counts.get(status, 0) + 1
-            continue
-        outcomes.append((row, result, _bounded_payload(result)))
-        delivery_rows.append(
-            DeliveryRow(
-                values=list(result.delivery.values),
-                notes=list(result.delivery.notes),
-            )
-        )
-        report = _row_report(result, row.row_id)
-        reports.append(report)
-        status_counts[report.processing_status] = (
-            status_counts.get(report.processing_status, 0) + 1
-        )
-
+    # Crash-safe batch: the CSV header is written once up front and the Job
+    # row is created before any enrichment; every completed row is then
+    # persisted (DB record + CSV line) IMMEDIATELY, so an interrupted run
+    # never loses finished rows and the Job stays "running" (clearly
+    # unfinished) instead of silently vanishing.
     BATCH_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"batch-{stamp}-{uuid.uuid4().hex[:8]}.csv"
-    writer.write_path(BATCH_DIR / filename, delivery_rows)
+    csv_path = BATCH_DIR / filename
+    writer = DeliveryCsvWriter(schema)
+    writer.write_header(csv_path)
 
     job = Job(
         kind="batch",
-        status=_job_status(status_counts),
+        status="running",
         created_at=datetime.utcnow(),
     )
     session.add(job)
     session.flush()
-    for row, result, payload in outcomes:
-        if result is None:
+
+    reports: list[BatchRowResult] = []
+    status_counts: dict[str, int] = {}
+    committed_rows = 0
+
+    try:
+        for row in selected:
+            try:
+                result = service.run(EnrichmentRequest.from_row(row))
+            except Exception as exc:  # noqa: BLE001 - row isolation: keep going
+                # Never expose args, stack traces or secrets; the exception
+                # class name alone is enough to route a human to the logs.
+                reason = f"unexpected row failure: {type(exc).__name__}"
+                status = ProcessingStatus.FAILED.value
+                session.add(
+                    ProductRecordModel(
+                        job_id=job.id,
+                        manufacturer="",
+                        brand="",
+                        part_number=row.mfg_part_num_value or "",
+                        description=row.part_desc_value or "",
+                        status=status,
+                        quality_score=0.0,
+                        payload=json.dumps(
+                            {
+                                "row_error": {
+                                    "type": type(exc).__name__,
+                                    "reason": reason,
+                                }
+                            }
+                        ),
+                    )
+                )
+                reports.append(
+                    BatchRowResult(
+                        row_id=row.row_id,
+                        mfg_part_num=row.mfg_part_num_value or "",
+                        processing_status=status,
+                        delivery_columns=0,
+                        review_reasons=[reason],
+                    )
+                )
+                status_counts[status] = status_counts.get(status, 0) + 1
+                session.commit()
+                committed_rows += 1
+                writer.append_row(csv_path, _blank_delivery_row(schema))
+                continue
+            product = result.product
             session.add(
                 ProductRecordModel(
                     job_id=job.id,
-                    manufacturer="",
-                    brand="",
-                    part_number=row.mfg_part_num_value or "",
-                    description=row.part_desc_value or "",
-                    status=ProcessingStatus.FAILED.value,
-                    quality_score=0.0,
-                    payload=payload,
+                    manufacturer=(
+                        product.identity.manufacturer if product else ""
+                    ),
+                    brand=product.identity.brand if product else "",
+                    part_number=result.input_row.mfg_part_num_value or "",
+                    description=result.input_row.part_desc_value or "",
+                    status=result.processing.status.value,
+                    quality_score=result.quality.overall,
+                    payload=_bounded_payload(result),
                 )
             )
-            continue
-        product = result.product
-        session.add(
-            ProductRecordModel(
-                job_id=job.id,
-                manufacturer=(
-                    product.identity.manufacturer if product else ""
-                ),
-                brand=product.identity.brand if product else "",
-                part_number=result.input_row.mfg_part_num_value or "",
-                description=result.input_row.part_desc_value or "",
-                status=result.processing.status.value,
-                quality_score=result.quality.overall,
-                payload=payload,
+            report = _row_report(result, row.row_id)
+            reports.append(report)
+            status_counts[report.processing_status] = (
+                status_counts.get(report.processing_status, 0) + 1
             )
-        )
-    try:
+            session.commit()
+            committed_rows += 1
+            writer.append_row(
+                csv_path,
+                DeliveryRow(
+                    values=list(result.delivery.values),
+                    notes=list(result.delivery.notes),
+                ),
+            )
+
+        job.status = _job_status(status_counts)
         session.commit()
     except Exception:
-        # The CSV file was written before the DB commit; never leave an
-        # orphan file behind for a run that did not persist. Only the exact
-        # file created for this run is removed.
-        (BATCH_DIR / filename).unlink(missing_ok=True)
+        session.rollback()
+        if committed_rows == 0:
+            # Nothing was persisted: never leave an orphan file behind for a
+            # run that produced no committed rows.
+            csv_path.unlink(missing_ok=True)
         raise
 
     return BatchResult(

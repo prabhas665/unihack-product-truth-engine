@@ -16,10 +16,12 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from app.core.domain import ProductIdentity
+from app.config import settings
 from app.sources.candidates import DiscoveryMethod, SourceCandidate
-from app.sources.errors import ProviderError
+from app.sources.errors import ProviderError, ProviderUnavailableError
 from app.sources.policy import SourcePolicy, SourcePolicyConfig, policy_from_settings
 from app.sources.ranking import rank_candidates
+from app.utils.retry import retry_call
 
 
 @runtime_checkable
@@ -156,12 +158,25 @@ def _run_providers(
     product: ProductIdentity,
     context: DiscoveryContext,
 ) -> tuple[list[SourceCandidate], list[ProviderErrorInfo]]:
-    """Run every provider once; typed failures become ProviderErrorInfo."""
+    """Run every provider once; typed failures become ProviderErrorInfo.
+
+    A retryable provider failure (rate limit / transient unavailability) is
+    retried on the same provider with exponential backoff before being
+    recorded as a ProviderErrorInfo (see DISCOVERY_RETRY_ATTEMPTS).
+    """
     discovered: list[SourceCandidate] = []
     provider_errors: list[ProviderErrorInfo] = []
     for provider in providers:
         try:
-            discovered.extend(provider.discover(product, context))
+            result = retry_call(
+                lambda: provider.discover(product, context),
+                attempts=settings.discovery_retry_attempts,
+                base_delay=settings.retry_base_delay_seconds,
+                should_retry=lambda exc: isinstance(
+                    exc, ProviderUnavailableError
+                ),
+            )
+            discovered.extend(result)
         except ProviderError as exc:
             provider_errors.append(
                 ProviderErrorInfo(

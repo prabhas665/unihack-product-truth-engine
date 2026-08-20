@@ -179,10 +179,17 @@ class FlakyService:
 
 class ControlledSession(SaSession):
     fail_commit = False
+    # Fail the Nth commit (1-based); None = off.
+    fail_on_commit_n: int | None = None
+    commit_count = 0
 
     def commit(self):
         if ControlledSession.fail_commit:
             raise RuntimeError("database down")
+        if ControlledSession.fail_on_commit_n is not None:
+            ControlledSession.commit_count += 1
+            if ControlledSession.commit_count == ControlledSession.fail_on_commit_n:
+                raise RuntimeError("database down")
         return super().commit()
 
 
@@ -427,6 +434,31 @@ class TestFilenamesAndCommit:
             ControlledSession.fail_commit = False
         assert list(batch_dir.glob("*.csv")) == []
         assert client.get("/api/dashboard").json()["last_batch_run"] is None
+
+    def test_mid_run_commit_failure_keeps_committed_rows(self, ctx):
+        client, Session, batch_dir = ctx
+        ControlledSession.fail_on_commit_n = 2
+        ControlledSession.commit_count = 0
+        try:
+            response = client.post(
+                "/api/batch", json={"rows": rows("XLC10ZW", "XLC02ZW")}
+            )
+            assert response.status_code == 500
+        finally:
+            ControlledSession.fail_on_commit_n = None
+        # The first row's record and CSV line were committed before the
+        # failure; the run surfaced the error instead of losing the row.
+        session = Session()
+        try:
+            records = session.query(ProductRecordModel).all()
+            assert len(records) == 1
+            assert records[0].part_number == "XLC10ZW"
+        finally:
+            session.close()
+        csvs = list(batch_dir.glob("*.csv"))
+        assert len(csvs) == 1
+        content = csvs[0].read_text(encoding="utf-8-sig")
+        assert content.count("\n") == 2  # header + the one committed row
 
 
 # --------------------------------------------------------------------------

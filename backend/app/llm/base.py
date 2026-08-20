@@ -41,6 +41,7 @@ from app.llm.types import (
     StructuredCompletionRequest,
     StructuredRequest,
 )
+from app.utils.retry import retry_call
 
 
 # Bounded worker pool for LLM calls. Providers are thread-safe (httpx.Client
@@ -146,7 +147,21 @@ class LLMClient(ABC):
         as ``LLMTimeoutError`` so a stuck LLM can never leave a stage RUNNING
         forever. The provider still receives ``timeout_seconds`` (used as its
         own idle backstop), so orphaned worker threads terminate promptly.
+
+        Transient provider failures (rate limits, flaky transports - anything
+        surfaced as ``LLMProviderUnavailableError``) are retried on the SAME
+        provider with exponential backoff (see LLM_RETRY_ATTEMPTS) before the
+        caller's failover chain is consulted.
         """
+        return retry_call(
+            lambda: self._invoke_once(request, prompt),
+            attempts=settings.llm_retry_attempts,
+            base_delay=settings.retry_base_delay_seconds,
+            should_retry=lambda exc: isinstance(exc, LLMProviderUnavailableError),
+        )
+
+    def _invoke_once(self, request: LLMRequest, prompt: str) -> str:
+        """One bounded attempt at the provider hook, with error mapping."""
         timeout = request.timeout_seconds or settings.llm_timeout_seconds
         try:
             if timeout and timeout > 0:

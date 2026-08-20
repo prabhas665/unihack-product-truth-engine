@@ -39,6 +39,11 @@ _OFFLINE_KEYS = {
     "search_provider_api_key": "",
     "GEMINI_API_KEY": "",
     "NVIDIA_NIM_API_KEY": "",
+    # Retries/backoff are exercised by dedicated tests with zeroed delays;
+    # keep the rest of the suite deterministic and fast.
+    "llm_retry_attempts": 0,
+    "discovery_retry_attempts": 0,
+    "retry_base_delay_seconds": 0.0,
 }
 
 
