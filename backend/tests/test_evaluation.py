@@ -55,19 +55,23 @@ def test_offline_evaluation_golden_identity_match(tmp_path):
 
     assert report.mode == "offline"
     assert report.rows_evaluated == 2
-    # Both ground-truth rows must match on the verified identity cells.
-    assert report.identity_exact_matches == 2
-    assert report.identity_exact_match_rate == 1.0
+    # The official sample data carries a WRONG manufacturer for PDSH4816AF
+    # ("Rheem Manufacturing" - a water-heater brand - for a Frigidaire
+    # dishwasher). The verified identity is corrected to Electrolux, so only
+    # the Whirlpool row can exact-match; the PDSH row honestly reports the
+    # sample-data mismatch instead of blessing the wrong value.
+    assert report.identity_exact_matches == 1
+    assert report.identity_exact_match_rate == 0.5
     assert report.placeholder_leak_rows == 0
     assert report.placeholder_leak_count == 0
 
     by_mpn = {r.mpn: r for r in report.benchmark}
     pdsh = by_mpn["PDSH4816AF"]
     wdts = by_mpn["WDTS7024RZ"]
-    assert pdsh.exact_match and wdts.exact_match
+    assert not pdsh.exact_match and wdts.exact_match
 
     pdsh_cells = {c.column: c for c in pdsh.comparisons}
-    assert pdsh_cells["MANUFACTURER_NAME"].actual == "Rheem Manufacturing"
+    assert pdsh_cells["MANUFACTURER_NAME"].actual == "Electrolux"
     assert pdsh_cells["BRAND_NAME"].actual == "FRIGIDAIRE"
     wdts_cells = {c.column: c for c in wdts.comparisons}
     assert wdts_cells["MANUFACTURER_NAME"].actual == "Whirlpool Corporation"

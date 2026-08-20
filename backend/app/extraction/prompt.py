@@ -25,6 +25,8 @@ def build_extraction_prompt(
         "- Use ONLY the evidence below. Never use knowledge from outside it.",
         "- Do not guess and do not infer specifications the evidence does not state.",
         "- Never fabricate a value: every attribute MUST list the evidence_ids that support it.",
+        "- evidence_ids MUST reference ONLY the bracketed [id] sections in the Evidence block.",
+        "- The 'Requested product context' block below is NOT evidence: never cite it as an evidence_id.",
         "- If the evidence conflicts for an attribute, emit ONE candidate per supported value (same name, different evidence_ids).",
         "- If a value is uncertain, lower its confidence instead of hiding the uncertainty.",
         "- normalized_value: fill ONLY when normalization is obvious and evidence-supported (e.g. '100 mm' -> '100' with unit 'mm'); otherwise leave empty.",
@@ -36,7 +38,7 @@ def build_extraction_prompt(
         '"unit": ..., "confidence": ..., "evidence_ids": [...], "notes": ...}]}.',
         "- No markdown fences, no bullet lists, no commentary before or after the JSON.",
         "",
-        "Product identity:",
+        "Requested product context (NOT evidence):",
     ]
     identity = request.identity
     if identity.manufacturer:

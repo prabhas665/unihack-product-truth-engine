@@ -31,6 +31,19 @@ def _reject_bool_confidence(value: object) -> object:
     return value
 
 
+def _coerce_none_str(value: object) -> object:
+    """Coerce ``null`` from the LLM into an empty string.
+
+    A null for an optional string field (unit, normalized_value, notes,
+    etc.) must not discard an otherwise valid attribute claim; the value is
+    still subject to the evidence gates downstream.
+    """
+    return "" if value is None else value
+
+
+_Str = Annotated[str, BeforeValidator(_coerce_none_str)]
+
+
 class ExtractionErrorKind(str, Enum):
     SCHEMA_INVALID = "schema_invalid"  # malformed JSON or schema violations
     LLM_FAILED = "llm_failed"  # provider unavailable/timeout/etc.
@@ -62,15 +75,15 @@ class ExtractionRequest(BaseModel):
 class ExtractionOutputItem(BaseModel):
     """One attribute claim as returned by the LLM (AI-facing JSON schema)."""
 
-    name: str
-    raw_value: str = ""
-    normalized_value: str = ""  # only when obvious and evidence-supported
-    unit: str = ""
+    name: _Str
+    raw_value: _Str = ""
+    normalized_value: _Str = ""  # only when obvious and evidence-supported
+    unit: _Str = ""
     confidence: Annotated[
         float, BeforeValidator(_reject_bool_confidence)
     ] = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
-    notes: str = ""
+    notes: _Str = ""
 
 
 class ExtractionOutput(BaseModel):

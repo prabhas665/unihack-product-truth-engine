@@ -39,7 +39,67 @@ def test_resolve_by_mpn_wins_over_brand_and_manufacturer():
         "Appliance Dealers Cooperative (APPDE)",
         lookup,
     )
-    assert verified.manufacturer == "Rheem Manufacturing"
+    assert verified.manufacturer == "Electrolux"
+    assert verified.brand == "FRIGIDAIRE"
+    assert verified.provenance == "mpn"
+
+
+def test_resolve_mpn_seed_rejected_when_brand_contradicts():
+    lookup = VerifiedBrandLookup.default()
+    verified = resolve_verified_identity(
+        "XLC02ZW",
+        "-- Unbranded --",
+        "DEWALT",
+        "Makita Usa Inc (5142)",
+        lookup,
+    )
+    # DEWALT resolves in the registry to Stanley Black & Decker, which
+    # contradicts the Makita seed: the seed must never be stamped.
+    assert verified.manufacturer == "Stanley Black & Decker"
+    assert verified.brand == "DEWALT"
+    assert verified.provenance == "brand"
+
+
+def test_resolve_mpn_seed_rejected_when_part_manuf_contradicts():
+    lookup = VerifiedBrandLookup.default()
+    verified = resolve_verified_identity(
+        "WDTS7024RZ",
+        "-- Unbranded --",
+        "-- No DIB Brand --",
+        "Freud Inc (2435)",
+        lookup,
+    )
+    assert verified.manufacturer == "Freud"
+    assert verified.brand == "Freud"
+    assert verified.provenance == "manufacturer"
+
+
+def test_resolve_mpn_seed_kept_when_input_compatible():
+    lookup = VerifiedBrandLookup.default()
+    verified = resolve_verified_identity(
+        "XLC02ZW",
+        "-- Unbranded --",
+        "-- No DIB Brand --",
+        "Makita Usa Inc (5142)",
+        lookup,
+    )
+    assert verified.manufacturer == "Makita Usa Inc"
+    assert verified.brand == "Makita"
+    assert verified.provenance == "mpn"
+
+
+def test_resolve_mpn_seed_kept_when_input_is_unknown_distributor():
+    lookup = VerifiedBrandLookup.default()
+    verified = resolve_verified_identity(
+        "PDSH4816AF",
+        "-- Unbranded --",
+        "-- No DIB Brand --",
+        "Acme Distribution LLC",
+        lookup,
+    )
+    # An unknown distributor name is not a registry-backed signal and must
+    # never defeat a correct seed.
+    assert verified.manufacturer == "Electrolux"
     assert verified.brand == "FRIGIDAIRE"
     assert verified.provenance == "mpn"
 
