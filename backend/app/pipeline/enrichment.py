@@ -130,7 +130,7 @@ def _build_fallback_client(model: str, timeout: float, provider: str = "") -> LL
     provider = (provider or settings.llm_provider or "").strip()
     if provider == "gemini":
         return GeminiClient(
-            api_key=settings.GEMINI_API_KEY,
+            api_keys=settings.gemini_api_keys,
             model=model,
             base_url=settings.GEMINI_BASE_URL,
             timeout_seconds=timeout,

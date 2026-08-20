@@ -266,13 +266,15 @@ class StubGeminiClient(LLMClient):
     def __init__(
         self,
         *,
-        api_key: str,
-        model: str,
-        base_url: str,
-        timeout_seconds: float,
+        api_key: str = "",
+        api_keys: list[str] | None = None,
+        model: str = "",
+        base_url: str = "",
+        timeout_seconds: float = 20.0,
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.api_keys = [k for k in (api_keys or []) if k] or ([api_key] if api_key else [])
         StubGeminiClient.instances.append(self)
 
     def _complete(

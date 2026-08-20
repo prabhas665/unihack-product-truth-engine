@@ -141,17 +141,21 @@ class GeminiSearchApiClient:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str = "",
+        api_keys: list[str] | None = None,
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
-        key = (api_key or "").strip()
-        if not key:
+        keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
+        if api_key and not keys:
+            keys = [api_key.strip()]
+        keys = [k for k in keys if k]
+        if not keys:
             raise ProviderConfigurationError(
                 "gemini", "GEMINI_API_KEY is not set"
             )
-        self._api_key = key
+        self._api_keys = keys
         self._model = (model or "").strip() or DEFAULT_MODEL
         self._base_url = (base_url or "").rstrip("/") or DEFAULT_BASE_URL
         self._timeout_seconds = timeout_seconds
@@ -175,10 +179,17 @@ class GeminiSearchApiClient:
             ],
         }
 
-        url = f"{self._base_url}/v1beta/models/{self._model}:generateContent?key={self._api_key}"
+        url = f"{self._base_url}/v1beta/models/{self._model}:generateContent?key={self._api_keys[0]}"
+
+        def _call(key: str) -> httpx.Response:
+            return self._client.post(
+                url.replace(self._api_keys[0], key, 1),
+                json=payload,
+                timeout=self._timeout_seconds,
+            )
 
         try:
-            response = self._client.post(url, json=payload, timeout=self._timeout_seconds)
+            response = _call(self._api_keys[0])
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 "gemini", f"Gemini provider timed out after {self._timeout_seconds}s"
@@ -187,6 +198,36 @@ class GeminiSearchApiClient:
             raise ProviderUnavailableError(
                 "gemini", f"Gemini provider unreachable: {exc}"
             ) from exc
+
+        # Rotate around the configured API keys on rate limits (each key has
+        # its own free-tier quota).
+        if response.status_code == 429 and len(self._api_keys) > 1:
+            for alt_key in self._api_keys[1:]:
+                try:
+                    alt = _call(alt_key)
+                except httpx.TimeoutException as exc:
+                    raise ProviderUnavailableError(
+                        "gemini", f"Gemini provider timed out after {self._timeout_seconds}s"
+                    ) from exc
+                except httpx.TransportError as exc:
+                    raise ProviderUnavailableError(
+                        "gemini", f"Gemini provider unreachable: {exc}"
+                    ) from exc
+                if alt.status_code == 429:
+                    continue
+                if alt.status_code == 401:
+                    continue
+                if alt.status_code >= 500:
+                    continue
+                if alt.status_code != 200:
+                    continue
+                response = alt
+                break
+            else:
+                raise ProviderUnavailableError(
+                    "gemini", "Gemini provider rate limit hit on all configured "
+                    "API keys; retry later"
+                )
 
         if response.status_code == 401:
             raise ProviderConfigurationError(
@@ -285,17 +326,19 @@ class GeminiSearchProvider:
 
             settings = app_settings
 
+        api_keys = getattr(settings, "gemini_api_keys", None)
         api_key = getattr(settings, "GEMINI_API_KEY", "")
         model = getattr(settings, "GEMINI_MODEL", DEFAULT_MODEL)
         base_url = getattr(settings, "GEMINI_BASE_URL", DEFAULT_BASE_URL)
         timeout = getattr(settings, "GEMINI_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
 
-        if not api_key:
+        if not api_key and not api_keys:
             raise ProviderConfigurationError(
                 "gemini", "GEMINI_API_KEY is not set in backend environment"
             )
 
         api_client = GeminiSearchApiClient(
+            api_keys=api_keys,
             api_key=api_key,
             model=model,
             base_url=base_url,

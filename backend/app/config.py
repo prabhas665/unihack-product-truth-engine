@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # The application starts without any of these set; a missing GEMINI_API_KEY
     # surfaces as a ProviderConfigurationError at discovery time, never at startup.
     GEMINI_API_KEY: str = ""
+    # Comma-separated list of Gemini API keys used to rotate around the
+    # per-key rate limit (GEMINI_API_KEY is the first/primary key). Each key
+    # has its own free-tier quota, so N keys multiply throughput by up to N.
+    GEMINI_API_KEYS: str = ""
     # Gemini model name; "gemini-flash-latest" is the stable alias for
     # grounding-capable models. Set GEMINI_MODEL in backend/.env to override.
     GEMINI_MODEL: str = "gemini-flash-latest"
@@ -200,6 +204,21 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def gemini_api_keys(self) -> list[str]:
+        """Ordered list of Gemini API keys for rate-limit rotation.
+
+        GEMINI_API_KEYS (comma-separated) wins when set; otherwise the single
+        GEMINI_API_KEY is used. Empty strings are dropped so a trailing comma
+        never produces a bogus key.
+        """
+        raw = (self.GEMINI_API_KEYS or "").strip()
+        if raw:
+            keys = [k.strip() for k in raw.split(",")]
+        else:
+            keys = [self.GEMINI_API_KEY or ""]
+        return [k for k in keys if k]
 
     def runtime_data_dir(self) -> "Path":
         from pathlib import Path
