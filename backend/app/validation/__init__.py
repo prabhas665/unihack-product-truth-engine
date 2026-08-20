@@ -30,6 +30,11 @@ from app.validation.manufacturer_brand import (
     ManufacturerBrandProvider,
     UnavailableManufacturerBrandProvider,
 )
+from app.validation.merge import (
+    canonical_attribute_name,
+    evidence_source_rank,
+    merge_validated_attributes,
+)
 from app.validation.normalizer import DefaultNormalizer, Normalizer
 from app.validation.service import (
     ValidationService,
@@ -69,6 +74,9 @@ __all__ = [
     "ValidationService",
     "ValidationSummary",
     "VocabularyProvider",
+    "canonical_attribute_name",
+    "evidence_source_rank",
+    "merge_validated_attributes",
     "to_domain_attribute_value",
     "to_domain_validation_results",
 ]

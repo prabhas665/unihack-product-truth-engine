@@ -12,20 +12,27 @@ are test doubles, not official data.
 import pytest
 from pydantic import ValidationError
 
-from app.core.domain import AttributeStatus, ValidationStatus
+from app.core.domain import AttributeStatus, SourceType, ValidationStatus
 from app.extraction import CandidateAttribute
+from app.sources.retrieval import EvidenceRecord
 from app.validation import (
     DefaultNormalizer,
     Severity,
     UnavailableManufacturerBrandProvider,
     UnavailableUOMProvider,
     UnavailableVocabularyProvider,
+    ValidatedAttribute,
     ValidationOutcome,
     ValidationService,
     to_domain_attribute_value,
 )
 from app.validation.lov import LOV_NOT_LOADED_NOTE, AttributeInfo, VocabularyValidation
 from app.validation.manufacturer_brand import MASTER_DATA_NOT_LOADED_NOTE
+from app.validation.merge import (
+    canonical_attribute_name,
+    evidence_source_rank,
+    merge_validated_attributes,
+)
 from app.validation.uom import UOM_NOT_LOADED_NOTE, UnitInfo, UomValidation
 
 
@@ -446,3 +453,95 @@ class TestDomainMapping:
         assert "uom.not_loaded" in codes
         for message in result.messages:
             assert message.message  # every message explains WHY
+
+
+class TestMergeAttributes:
+    def test_empty_input(self):
+        assert merge_validated_attributes([]) == []
+
+    def test_single_attribute_untouched(self):
+        item = ValidatedAttribute(name="Width", raw_value="0.75", unit="in", confidence=0.9)
+        assert merge_validated_attributes([item]) == [item]
+
+    def test_trailing_unit_markers_group_imperial_and_metric(self):
+        imperial = ValidatedAttribute(
+            name="Width (in)", raw_value="0.75", unit="in", confidence=0.9
+        )
+        metric = ValidatedAttribute(
+            name="Width (mm)", raw_value="19.05", unit="mm", confidence=0.85
+        )
+        merged = merge_validated_attributes([metric, imperial])
+        assert len(merged) == 1
+        assert merged[0].name == "Width (in)"
+        assert merged[0].raw_value == "0.75"
+
+    def test_higher_confidence_wins(self):
+        weak = ValidatedAttribute(name="Belt Length", raw_value="18 in", confidence=0.6)
+        strong = ValidatedAttribute(name="Belt Length", raw_value="18 in", confidence=0.95)
+        merged = merge_validated_attributes([weak, strong])
+        assert len(merged) == 1
+        assert merged[0].confidence == 0.95
+
+    def test_exact_duplicates_collapse(self):
+        first = ValidatedAttribute(name="Belt Length", raw_value="18 in", confidence=0.9)
+        second = ValidatedAttribute(name="Belt Length", raw_value="18 in", confidence=0.9)
+        merged = merge_validated_attributes([first, second])
+        assert len(merged) == 1
+        assert merged[0] is first
+
+    def test_confidence_tie_broken_by_evidence_source_rank(self):
+        metric = ValidatedAttribute(
+            name="Width", raw_value="19.05", unit="mm", confidence=0.9,
+            evidence_refs=["distributor-1"],
+        )
+        imperial = ValidatedAttribute(
+            name="Width", raw_value="0.75", unit="in", confidence=0.9,
+            evidence_refs=["official-1"],
+        )
+        rank = evidence_source_rank(
+            [
+                _ranked_evidence("distributor-1", SourceType.UNKNOWN),
+                _ranked_evidence("official-1", SourceType.MANUFACTURER_PRODUCT_PAGE),
+            ]
+        )
+        merged = merge_validated_attributes([metric, imperial], evidence_rank=rank)
+        assert len(merged) == 1
+        assert merged[0].raw_value == "0.75"
+
+    def test_confidence_tie_without_evidence_keeps_first(self):
+        first = ValidatedAttribute(name="Width", raw_value="0.75", confidence=0.9)
+        second = ValidatedAttribute(name="Width", raw_value="0.76", confidence=0.9)
+        merged = merge_validated_attributes([first, second])
+        assert len(merged) == 1
+        assert merged[0] is first
+
+    def test_distinct_attributes_never_merged(self):
+        items = [
+            ValidatedAttribute(name="Width", raw_value="0.75", confidence=0.9),
+            ValidatedAttribute(name="Length", raw_value="18", unit="in", confidence=0.9),
+        ]
+        merged = merge_validated_attributes(items)
+        assert [a.name for a in merged] == ["Width", "Length"]
+
+    def test_merged_duplicates_reported(self):
+        reasons: list[str] = []
+        merged = merge_validated_attributes(
+            [
+                ValidatedAttribute(name="Width (in)", raw_value="0.75", confidence=0.9),
+                ValidatedAttribute(name="Width (mm)", raw_value="19.05", confidence=0.85),
+            ],
+            out_reasons=reasons,
+        )
+        assert len(merged) == 1
+        assert len(reasons) == 1
+        assert "merged duplicate attribute" in reasons[0]
+        assert "Width (mm)" in reasons[0]
+
+    def test_canonical_name_strips_case_whitespace_and_markers(self):
+        assert canonical_attribute_name("  Belt   Width (in)  ") == "belt width"
+        assert canonical_attribute_name("Speed (metric)") == "speed"
+        assert canonical_attribute_name("voltage rating") == "voltage rating"
+
+
+def _ranked_evidence(evidence_id: str, source_type: SourceType) -> EvidenceRecord:
+    return EvidenceRecord(evidence_id=evidence_id, source_type=source_type)

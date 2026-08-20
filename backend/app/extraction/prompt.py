@@ -29,6 +29,8 @@ def build_extraction_prompt(
         "- The 'Requested product context' block below is NOT evidence: never cite it as an evidence_id.",
         "- If the evidence conflicts for an attribute, emit ONE candidate per supported value (same name, different evidence_ids).",
         "- If a value is uncertain, lower its confidence instead of hiding the uncertainty.",
+        "- Extract EVERY attribute the evidence states, not just a few: do not stop after the first handful.",
+        "- Respond in English: translate non-English evidence values into English; write notes in English.",
         "- normalized_value: fill ONLY when normalization is obvious and evidence-supported (e.g. '100 mm' -> '100' with unit 'mm'); otherwise leave empty.",
         "- notes: one short, evidence-based, user-safe line. Never include private reasoning or chain-of-thought.",
         "",

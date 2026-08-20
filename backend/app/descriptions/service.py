@@ -138,7 +138,9 @@ Rules:
 - If a fact is missing, leave that field empty ("" or []).
 - item_features: one concise feature per entry, each grounded in a fact.
 - The "with" field lists accessories/items included with the product; leave
-  it empty unless the facts say so."""
+  it empty unless the facts say so.
+- Always respond in English, even when the source evidence is in another
+  language (translate, do not omit)."""
 
 
 def build_prompt(

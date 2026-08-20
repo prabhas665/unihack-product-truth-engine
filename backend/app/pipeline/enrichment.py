@@ -99,6 +99,7 @@ from app.unihack.models import DeliveryRow, UniHackInputRow
 from app.unihack.parser import INPUT_COLUMNS, UniHackInputParser
 from app.unihack.schema import DeliverySchema
 from app.unihack.writer import DeliveryCsvWriter
+from app.validation.merge import evidence_source_rank, merge_validated_attributes
 from app.validation.service import ValidationService, to_domain_attribute_value
 from app.validation.types import (
     Severity,
@@ -727,6 +728,11 @@ class EnrichmentService:
 
         # -- description generation -----------------------------------------
         validated = validation.attributes if validation is not None else []
+        validated = merge_validated_attributes(
+            validated,
+            evidence_rank=evidence_source_rank(evidence),
+            out_reasons=review_reasons,
+        )
         mark(StageName.DESCRIPTION, StageStatus.RUNNING)
         descriptions, desc_note, desc_reasons, desc_hint = (
             self._generate_descriptions(
