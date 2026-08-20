@@ -27,6 +27,37 @@ RANKING_WEIGHTS: dict[str, float] = {
     "trust_level": 0.10,
 }
 
+# Small score penalty for non-English pages so an English page wins when
+# evidence quality is close (e.g. makitatools.com vs makitatools.com/es).
+# A foreign page with clearly better evidence still ranks first.
+FOREIGN_LOCALE_PENALTY = 0.02
+
+# Locale hints treated as non-English: country-code TLDs, subdomains, path
+# segments and lang= parameters. Conservative list - English-speaking
+# markets (.se/.in/.co.uk) are deliberately excluded.
+_FOREIGN_LOCALE_CODES = frozenset(
+    {
+        "es", "de", "fr", "it", "pt", "ru", "pl", "nl",
+        "ja", "zh", "ko", "tr", "mx", "br", "ar", "th",
+    }
+)
+_LOCALE_SEGMENT_RE = re.compile(r"(?:^|[/.:])([a-z]{2})(?:[/.:-]|$)")
+_LANG_PARAM_RE = re.compile(
+    r"[?&](?:lang|hl|locale|language)=([a-z]{2})(?:-[a-z]{2})?"
+)
+
+
+def _is_foreign_locale(url: str) -> bool:
+    """True when a URL carries a clear non-English locale marker."""
+    lowered = (url or "").lower()
+    for match in _LOCALE_SEGMENT_RE.finditer(lowered):
+        if match.group(1) in _FOREIGN_LOCALE_CODES:
+            return True
+    for match in _LANG_PARAM_RE.finditer(lowered):
+        if match.group(1) in _FOREIGN_LOCALE_CODES:
+            return True
+    return False
+
 STATUS_SCORES = {
     CandidateStatus.ALLOWED: 1.0,
     CandidateStatus.PENDING: 0.5,
@@ -95,9 +126,12 @@ def score_candidate(
     product: ProductIdentity,
     weights: dict[str, float] | None = None,
 ) -> float:
-    """Weighted relevance score in 0..1 (used as `relevance_score`)."""
+    """Weighted relevance score in 0..1 (used as `relevance_score`).
+
+    Non-English locale pages get a small penalty so English pages win ties.
+    """
     w = weights or RANKING_WEIGHTS
-    return (
+    base = (
         w["policy_status"] * STATUS_SCORES[candidate.status]
         + w["manufacturer_domain"] * RELATIONSHIP_SCORES[candidate.manufacturer_relationship]
         + w["source_type"] * SOURCE_TYPE_SCORES[candidate.source_type]
@@ -105,6 +139,9 @@ def score_candidate(
         + w["relevance"] * _title_url_relevance(candidate, product)
         + w["trust_level"] * TRUST_SCORES[candidate.trust_level]
     )
+    if _is_foreign_locale(candidate.url):
+        base = max(0.0, base - FOREIGN_LOCALE_PENALTY)
+    return base
 
 
 def rank_candidates(
@@ -114,7 +151,8 @@ def rank_candidates(
 ) -> list[SourceCandidate]:
     """Return scored copies of the candidates, sorted best-first.
 
-    Ties are broken by URL for full determinism.
+    Ties are broken by language preference (English first), then by URL for
+    full determinism.
     """
     scored = [
         candidate.model_copy(
@@ -122,4 +160,11 @@ def rank_candidates(
         )
         for candidate in candidates
     ]
-    return sorted(scored, key=lambda c: (-c.relevance_score, c.url))
+    return sorted(
+        scored,
+        key=lambda c: (
+            -c.relevance_score,
+            _is_foreign_locale(c.url),
+            c.url,
+        ),
+    )

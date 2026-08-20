@@ -38,6 +38,7 @@ from app.sources.providers import (
     SearchApiClient,
     SearchProvider,
     SearchResult,
+    build_recall_query,
     build_search_query,
     providers_from_settings,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "SourcePolicy",
     "SourcePolicyConfig",
     "SourceProvider",
+    "build_recall_query",
     "build_search_query",
     "normalize_domain",
     "policy_from_settings",

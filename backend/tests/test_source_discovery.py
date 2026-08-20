@@ -239,6 +239,40 @@ class TestDiscoveryOrchestration:
             PROVIDERS.remove(fake)
 
 
+class TestRankingLanguage:
+    def test_english_page_wins_over_spanish_when_scores_tie(self):
+        product = make_product(mpn="M1")
+        policy = acme_policy()
+        en = policy.evaluate(
+            make_candidate("https://acme-controls.example/products/m1")
+        )
+        es = policy.evaluate(
+            make_candidate("https://acme-controls.example/es/products/m1")
+        )
+        ranked = rank_candidates([es, en], product)
+        assert ranked[0].url == en.url
+        assert ranked[0].relevance_score > ranked[1].relevance_score
+
+    def test_foreign_page_with_better_evidence_still_wins(self):
+        product = make_product(mpn="M1")
+        policy = acme_policy()
+        es = policy.evaluate(
+            make_candidate(
+                "https://acme-controls.example/es/products/M1-specs",
+                title="M1 Specifications",
+            )
+        )
+        en = policy.evaluate(
+            make_candidate(
+                "https://acme-controls.example/products/controller",
+                title="Acme Controller",
+            )
+        )
+        ranked = rank_candidates([en, es], product)
+        assert ranked[0].url == es.url
+        assert ranked[0].relevance_score > ranked[1].relevance_score
+
+
 class TestPolicyFromSettings:
     def test_env_config_parsed(self, monkeypatch):
         monkeypatch.setattr(

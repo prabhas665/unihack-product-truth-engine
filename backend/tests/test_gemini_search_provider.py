@@ -439,6 +439,36 @@ class TestDiscoveryFlowWithGeminiProvider:
 # ------------------------------------------------------------ provider selection --
 
 
+class TestGeminiDiscoveryRecall:
+    def test_pass1_uses_exact_mpn_query(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.read())
+            captured["text"] = payload["contents"][0]["parts"][0]["text"]
+            return httpx.Response(200, json=grounding_payload())
+
+        product = make_product()
+        provider = provider_with(handler)
+        provider.discover(product, DiscoveryContext(product=product))
+        assert captured["text"] == 'Acme Controls "M1" Acme'
+        assert "specifications" not in captured["text"]
+
+    def test_pass2_uses_recall_query(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.read())
+            captured["text"] = payload["contents"][0]["parts"][0]["text"]
+            return httpx.Response(200, json=grounding_payload())
+
+        product = make_product()
+        provider = provider_with(handler)
+        provider.discover(product, DiscoveryContext(product=product, query_biased=False))
+        assert captured["text"] == "M1 specifications Acme Controls"
+        assert '"M1"' not in captured["text"]
+
+
 class TestProviderSelection:
     def test_unset_discovery_provider_uses_registry(self):
         assert providers_from_settings() == list(PROVIDERS)

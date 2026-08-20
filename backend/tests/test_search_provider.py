@@ -10,6 +10,8 @@ with canned JSON responses. The real provider is NEVER executed here (use
 `python -m app.sources.providers.manual_check` for that).
 """
 
+import json
+
 import httpx
 import pytest
 
@@ -29,6 +31,7 @@ from app.sources import (
     SearchApiClient,
     SearchProvider,
     SourcePolicyConfig,
+    build_recall_query,
     build_search_query,
     providers_from_settings,
     run_discovery,
@@ -109,6 +112,42 @@ class TestQueryBuilder:
 
     def test_empty_identity_yields_empty_query(self):
         assert build_search_query(ProductIdentity()) == ""
+
+    def test_build_recall_query_unquotes_mpn_and_adds_specs(self):
+        product = ProductIdentity(manufacturer="Acme Controls", mpn="M1")
+        assert build_recall_query(product) == "M1 specifications Acme Controls"
+
+    def test_build_recall_query_without_manufacturer(self):
+        product = ProductIdentity(mpn="M1")
+        assert build_recall_query(product) == "M1 specifications"
+
+
+class TestDiscoveryRecall:
+    def test_pass1_uses_exact_mpn_query(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["q"] = json.loads(request.read())["q"]
+            return httpx.Response(200, json=organic_payload())
+
+        product = make_product(mpn="M1")
+        provider = provider_with(handler)
+        provider.discover(product, DiscoveryContext(product=product))
+        assert captured["q"] == 'Acme Controls "M1" Acme'
+        assert "specifications" not in captured["q"]
+
+    def test_pass2_uses_recall_query(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["q"] = json.loads(request.read())["q"]
+            return httpx.Response(200, json=organic_payload())
+
+        product = make_product(mpn="M1")
+        provider = provider_with(handler)
+        provider.discover(product, DiscoveryContext(product=product, query_biased=False))
+        assert captured["q"] == "M1 specifications Acme Controls"
+        assert '"M1"' not in captured["q"]
 
 
 # ------------------------------------------------------------ search API client --

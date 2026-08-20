@@ -32,6 +32,7 @@ from app.sources.providers.search import (
     SearchApiClient,
     SearchProvider,
     SearchResult,
+    build_recall_query,
     build_search_query,
     guess_source_type,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "SearchApiClient",
     "SearchProvider",
     "SearchResult",
+    "build_recall_query",
     "build_search_query",
     "guess_source_type",
     "providers_from_settings",

@@ -308,13 +308,17 @@ class GeminiSearchProvider:
     ) -> list[SourceCandidate]:
         """Return candidate sources for the product via Gemini grounding.
 
-        1. Build search query from product identity
+        1. Build search query from product identity (Pass 1 exact; discovery
+           Pass 2 uses the wider recall variant)
         2. Call Gemini generateContent with google_search_retrieval
         3. Parse groundingChunks into SourceCandidate s
         4. Rank candidates via existing rank_candidates()
         5. Return PENDING / UNVERIFIED candidates (SourcePolicy decides ALLOWED)
         """
-        query = build_search_query(product)
+        from app.sources.providers.search import build_recall_query
+
+        recall = not bool(getattr(context, "query_biased", True))
+        query = build_recall_query(product) if recall else build_search_query(product)
         if not query:
             return []
 

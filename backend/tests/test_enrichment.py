@@ -563,6 +563,26 @@ class TestSparseAndFailedRuns:
         assert result.processing.status == ProcessingStatus.NEEDS_REVIEW
 
 
+class TestRetrievalCap:
+    def test_retrieval_fetches_only_max_candidates(self, monkeypatch):
+        monkeypatch.setattr(settings, "retrieval_max_candidates", 3)
+        urls = [f"https://acme.com/p/{i}" for i in range(8)]
+        retriever = FakeRetriever([])
+        service = make_service(
+            provider=FakeProvider([candidate(u) for u in urls]),
+            manufacturer_domains=["acme.com"],
+            retriever=retriever,
+            llm=FakeLLMClient(output=canned_output()),
+        )
+        service.run(default_request())
+        assert len(retriever.calls) == 3
+        assert retriever.calls == urls[:3]
+
+    def test_retrieval_cap_defaults_to_six(self, monkeypatch):
+        monkeypatch.delenv("RETRIEVAL_MAX_CANDIDATES", raising=False)
+        assert settings.retrieval_max_candidates == 6
+
+
 class TestExtractionFailureModes:
     def test_llm_provider_failure_marks_extraction_failed(self):
         result = make_service(

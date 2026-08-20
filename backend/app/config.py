@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     retrieval_max_bytes: int = 5_000_000  # HTML responses
     retrieval_max_pdf_bytes: int = 25_000_000
     retrieval_user_agent: str = "ProductTruthEngine/0.1 (hackathon)"
+    # Cap on how many allowed candidates are actually fetched per product;
+    # keeps per-product latency bounded (pages are fetched sequentially).
+    retrieval_max_candidates: int = 6
     # Cap on extracted-readable-text per evidence record (characters), applied
     # AFTER HTML/PDF text extraction so the stored evidence text stays bounded
     # even when a page/PDF yields far more text than the 20k prompt budget.

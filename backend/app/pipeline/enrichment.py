@@ -866,11 +866,17 @@ class EnrichmentService:
     def _retrieve(
         self, candidates: list[SourceCandidate]
     ) -> tuple[list[EvidenceRecord], list[str]]:
-        """Fetch every allowed candidate; returns (records, failure notes)."""
+        """Fetch allowed candidates (capped); returns (records, failure notes).
+
+        ``retrieval_max_candidates`` bounds how many pages are fetched so a
+        product with many allowed sources cannot run unbounded sequential
+        fetches.
+        """
         retriever = self._retriever or self._default_retriever()
         records: list[EvidenceRecord] = []
         failures: list[str] = []
-        for candidate in candidates:
+        max_candidates = max(1, int(getattr(settings, "retrieval_max_candidates", 6)))
+        for candidate in candidates[:max_candidates]:
             try:
                 record = retriever(candidate)
             except Exception as exc:  # a custom retriever must not break the run

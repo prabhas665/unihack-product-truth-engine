@@ -187,6 +187,29 @@ def build_search_query(product: ProductIdentity) -> str:
     return query
 
 
+def build_recall_query(product: ProductIdentity) -> str:
+    """Wider recall query for discovery Pass 2 (zero ALLOWED in Pass 1).
+
+    A genuinely different query from the Pass-1 form: unquoted MPN first,
+    then "specifications" and the manufacturer. Never trusts more than the
+    identity - the policy still gates every result.
+    """
+    mpn = (product.mpn or "").strip()
+    manufacturer = (product.manufacturer or "").strip()
+
+    parts: list[str] = []
+    if mpn:
+        parts.append(mpn)
+    parts.append("specifications")
+    if manufacturer:
+        parts.append(manufacturer)
+
+    query = " ".join(parts).strip()
+    if len(query) > _QUERY_MAX_LENGTH:
+        query = query[: _QUERY_MAX_LENGTH - 1].rstrip() + "…"
+    return query
+
+
 def _description_tokens(product: ProductIdentity, max_tokens: int = 4) -> list[str]:
     skip: set[str] = set()
     for field in (product.manufacturer, product.brand, product.mpn):
@@ -286,7 +309,11 @@ class SearchProvider:
     def discover(
         self, product: ProductIdentity, context: "DiscoveryContext"
     ) -> list[SourceCandidate]:
-        query = build_search_query(product)
+        # Pass 1 (query_biased=True) uses the exact MPN query; discovery
+        # Pass 2 (query_biased=False) uses the wider recall variant instead
+        # of re-sending an identical query.
+        recall = not bool(getattr(context, "query_biased", True))
+        query = build_recall_query(product) if recall else build_search_query(product)
         if not query:
             return []  # nothing to search for; not an error
         results = self._api_client.search(query)
