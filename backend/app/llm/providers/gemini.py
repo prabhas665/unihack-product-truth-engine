@@ -127,10 +127,11 @@ class GeminiClient(LLMClient):
                 f"{self.provider}: provider unreachable: {exc}"
             ) from exc
 
-        # Rotate around the configured API keys on rate limits: each key has
-        # its own free-tier quota, so a 429 on one key is retried immediately
-        # with the next key before the retry/backoff layer is even consulted.
-        if response.status_code == 429 and len(self._api_keys) > 1:
+        # Rotate around the configured API keys on rate limits or auth
+        # failures: each key has its own free-tier quota, so a 429 or
+        # 401/403 on one key is retried immediately with the next key
+        # before the retry/backoff layer is even consulted.
+        if response.status_code in (429, 401, 403) and len(self._api_keys) > 1:
             for alt_key in self._api_keys[1:]:
                 try:
                     alt = self._client.post(

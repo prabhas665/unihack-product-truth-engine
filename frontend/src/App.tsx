@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { enrichOne, getDashboard, getHealth, runBatch, runEvaluation } from "./api/client";
+import { enrichOne, getDashboard, getHealth, lookupMpn, runBatch, runEvaluation } from "./api/client";
 import type { HealthResponse } from "./api/client";
 import "./styles.css";
 import type {
@@ -10,10 +10,35 @@ import type {
   DashboardResponse,
   EnrichmentRequest,
   EnrichmentResult,
+  LookupResult,
   Severity,
   StageStatus,
   ValidationOutcome,
 } from "./api/types";
+
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: string | null }
+> {
+  state = { error: null as string | null };
+  static getDerivedStateFromError(err: unknown) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="error-box" role="alert">
+          <strong>Something went wrong.</strong> {this.state.error}
+          <br />
+          <button className="secondary" onClick={() => this.setState({ error: null })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Step 8B demo preset: a real manufacturer + MPN with an operator-confirmed
 // manufacturer URL. This is an input (never copied from any dataset answer);
@@ -262,6 +287,9 @@ export default function App() {
           ) : health ? (
             <Badge color="#16a34a">
               backend {health.app} v{health.version}
+              {typeof health.database_records === "number" && (
+                <> · {health.database_records} records</>
+              )}
             </Badge>
           ) : (
             <Badge color={GREY}>checking backend…</Badge>
@@ -269,16 +297,18 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="tabs">
+      <nav className="tabs" role="tablist">
         {(
           [
             ["single", "Single product"],
-            ["database", "Database"],
+            ["database", "Intelligence Store"],
             ["batch", "Batch"],
           ] as [Tab, string][]
         ).map(([name, label]) => (
           <button
             key={name}
+            role="tab"
+            aria-selected={tab === name}
             className={tab === name ? "active" : ""}
             onClick={() => setTab(name)}
           >
@@ -287,9 +317,11 @@ export default function App() {
         ))}
       </nav>
 
-      {tab === "single" && <SingleProductTab />}
-      {tab === "database" && <DatabaseTab />}
-      {tab === "batch" && <BatchTab />}
+      <ErrorBoundary key={tab}>
+        {tab === "single" && <SingleProductTab />}
+        {tab === "database" && <DatabaseTab />}
+        {tab === "batch" && <BatchTab />}
+      </ErrorBoundary>
     </main>
   );
 }
@@ -452,6 +484,7 @@ function SingleProductTab() {
             Load verified demo
           </button>
           <button type="submit" disabled={loading}>
+            {loading && <span className="spinner" />}
             {loading ? "Running pipeline…" : "Run enrichment"}
           </button>
         </div>
@@ -480,6 +513,10 @@ function SingleProductTab() {
 function DatabaseTab() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchMpn, setSearchMpn] = useState("");
+  const [searchResult, setSearchResult] = useState<LookupResult | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     getDashboard()
@@ -489,6 +526,21 @@ function DatabaseTab() {
       );
   }, []);
 
+  async function onSearch() {
+    const mpn = searchMpn.trim();
+    if (!mpn) return;
+    setSearching(true);
+    setSearchError(null);
+    setSearchResult(null);
+    try {
+      setSearchResult(await lookupMpn(mpn));
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSearching(false);
+    }
+  }
+
   if (error) return <div className="error-box">Dashboard failed: {error}</div>;
   if (!dashboard) return <p className="muted panel">Loading…</p>;
 
@@ -496,6 +548,47 @@ function DatabaseTab() {
   const lastRun = dashboard.last_batch_run;
   return (
     <div className="panel">
+      <Section title="MPN Lookup">
+        <form
+          className="form"
+          onSubmit={(e) => { e.preventDefault(); void onSearch(); }}
+          style={{ display: "flex", gap: "0.5em", alignItems: "end" }}
+        >
+          <label className="field" style={{ flex: 1 }}>
+            <span>Search by MPN</span>
+            <input
+              value={searchMpn}
+              onChange={(e) => setSearchMpn(e.target.value)}
+              placeholder="e.g. XLC10ZW"
+            />
+          </label>
+          <button type="submit" disabled={searching} style={{ marginBottom: 2 }}>
+            {searching ? "Searching…" : "Search"}
+          </button>
+        </form>
+        {searchError && <div className="error-box">Lookup failed: {searchError}</div>}
+        {searchResult && (
+          <div style={{ marginTop: "0.75em" }}>
+            <Kv k="MPN" v={searchResult.query} />
+            <Kv k="Source" v={searchResult.source} />
+            <Kv k="Freshness" v={
+              searchResult.stale
+                ? "STALE (data exists but may be outdated)"
+                : "FRESH (recently enriched)"
+            } />
+            <Kv k="Total matches" v={searchResult.total_matches} />
+            {searchResult.stored_records.map((rec, i) => (
+              <div key={rec.record_id || i} className="candidate" style={{ marginTop: "0.5em" }}>
+                <Kv k="Manufacturer" v={rec.manufacturer || "–"} />
+                <Kv k="Brand" v={rec.brand || "–"} />
+                <Kv k="Status" v={rec.status} />
+                <Kv k="Last enriched" v={rec.last_enriched_at || "–"} />
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
       <Section title="Product Intelligence Store">
         <Kv k="Total records" v={db.total_records} />
         <Kv k="Needs review" v={db.needs_review} />
@@ -558,6 +651,7 @@ function ComplianceSection({
 }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [token, setToken] = useState("");
   const [lastReport, setLastReport] = useState<string | null>(
     dashboard.compliance?.last_report_path ?? null
   );
@@ -567,7 +661,7 @@ function ComplianceSection({
     setError(null);
     setLastReport(null);
     try {
-      const report = await runEvaluation({ live: false });
+      const report = await runEvaluation({ live: false }, token || undefined);
       setLastReport(report.report_path);
       onRerun();
     } catch (err) {
@@ -594,8 +688,17 @@ function ComplianceSection({
       />
       <Kv k="Invoice rule pass rate" v={pct(compliance?.invoice_rule_pass_rate ?? null)} />
       <Kv k="Mobile rule pass rate" v={pct(compliance?.mobile_rule_pass_rate ?? null)} />
+      <label className="field" style={{ maxWidth: 320 }}>
+        <span>API Token</span>
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="EVALUATION_API_TOKEN"
+        />
+      </label>
       <div className="row-actions">
-        <button onClick={onRun} disabled={running}>
+        <button onClick={onRun} disabled={running || !token.trim()}>
           {running ? "Running evaluation…" : "Run evaluation (offline)"}
         </button>
       </div>
@@ -668,6 +771,7 @@ function BatchTab() {
             value={mpns}
             onChange={(e) => setMpns(e.target.value)}
             placeholder="XLC10ZW, DCB518ASTS06G"
+            disabled={running}
           />
         </label>
         <p className="field-hint">
@@ -677,6 +781,7 @@ function BatchTab() {
         </p>
         <div className="form-actions">
           <button type="submit" disabled={running}>
+            {running && <span className="spinner" />}
             {running ? "Running batch…" : "Run batch"}
           </button>
         </div>

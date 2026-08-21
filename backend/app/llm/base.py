@@ -157,7 +157,10 @@ class LLMClient(ABC):
             lambda: self._invoke_once(request, prompt),
             attempts=settings.llm_retry_attempts,
             base_delay=settings.retry_base_delay_seconds,
-            should_retry=lambda exc: isinstance(exc, LLMProviderUnavailableError),
+            should_retry=lambda exc: isinstance(exc, LLMTimeoutError) or (
+                isinstance(exc, LLMProviderUnavailableError)
+                and "authentication failed" not in str(exc)
+            ),
         )
 
     def _invoke_once(self, request: LLMRequest, prompt: str) -> str:

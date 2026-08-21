@@ -1,7 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.schemas import HealthResponse, LLMHealthResponse
+from app.db.database import get_session
+from app.db.models import ProductRecordModel
 from app.llm import (
     CompletionRequest,
     LLMConfigurationError,
@@ -14,10 +18,19 @@ router = APIRouter(prefix="/api", tags=["health"])
 
 
 @router.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok", app=settings.app_name, version=settings.version
-    )
+def health(session: Session = Depends(get_session)) -> HealthResponse:
+    try:
+        total = session.query(func.count()).select_from(
+            ProductRecordModel
+        ).scalar() or 0
+        return HealthResponse(
+            status="ok", app=settings.app_name, version=settings.version,
+            database_records=total,
+        )
+    except Exception:
+        return HealthResponse(
+            status="degraded", app=settings.app_name, version=settings.version,
+        )
 
 
 @router.get("/health/llm", response_model=LLMHealthResponse)

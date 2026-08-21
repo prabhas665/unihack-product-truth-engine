@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     llm_retry_attempts: int = 2
     retry_base_delay_seconds: float = 1.0
     # Additional attempts for a single discovery provider call (same policy).
-    discovery_retry_attempts: int = 1
+    discovery_retry_attempts: int = 2
 
     # Hard wall-clock deadline for ONE pipeline run (seconds). When the
     # deadline passes, LLM-bound stages (extraction/descriptions) are skipped

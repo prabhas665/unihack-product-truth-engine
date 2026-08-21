@@ -15,15 +15,18 @@
 # via DATA_DIR + DATABASE_URL, so data survives restarts and redeploys.
 #
 # PROVIDER STACK (free-tier speed tuning):
-#   - Discovery: Serper (SEARCH_PROVIDER_API_KEY) primary, Gemini search
-#     (GEMINI_API_KEY) backup, comma-separated DISCOVERY_PROVIDER=search,gemini.
-#   - LLM: Gemini (GEMINI_API_KEY) primary with the cheap flash-lite model;
-#     NVIDIA NIM as the first fallback (NVIDIA_NIM_API_KEY) and Gemini again
-#     as the second fallback model (LLM_FALLBACK_MODEL_2=gemini-flash-latest).
+#   - Discovery: Groq web search (GROQ_API_KEY) primary, Gemini search
+#     (GEMINI_API_KEY) backup, comma-separated DISCOVERY_PROVIDER=groq,gemini.
+#   - LLM: Gemini (GEMINI_API_KEY + GEMINI_API_KEYS multi-key rotation)
+#     primary with the cheap flash-lite model; Groq via OpenRouter adapter
+#     (GROQ_API_KEY) as the first fallback; NVIDIA NIM as the second
+#     fallback (NVIDIA_NIM_API_KEY + LLM_FALLBACK_PROVIDER_2=nvidia).
 #   - A 180 s LLM timeout with per-run 180 s deadline keeps runs bounded.
+#   - GEMINI_API_KEYS: comma-separated list of Gemini keys. WINS when set.
+#     5 keys provided locally; set all 5 in Render dashboard for max throughput.
 #   - IMPORTANT: never set LLM_FALLBACK_PROVIDER_2 to an empty string on
 #     Render - an empty value becomes the literal provider name and breaks
-#     requests. Omit the variable entirely (or set it to "gemini").
+#     requests. Omit the variable entirely (or set it to "nvidia").
 
 services:
   - type: web
@@ -52,12 +55,16 @@ services:
         value: "*"
       # ---- discovery -----------------------------------------------------
       - key: DISCOVERY_PROVIDER
-        value: search,gemini
+        value: groq,gemini
+      - key: GROQ_API_KEY
+        sync: false
       - key: SEARCH_PROVIDER_API_KEY
         sync: false
       - key: SEARCH_PROVIDER_RESULTS_LIMIT
         value: "6"
       - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEYS
         sync: false
       # ---- LLM -----------------------------------------------------------
       - key: LLM_PROVIDER
@@ -67,19 +74,22 @@ services:
       - key: LLM_TIMEOUT_SECONDS
         value: "180"
       - key: LLM_FALLBACK_PROVIDER
-        value: nvidia
+        value: openrouter
       - key: LLM_FALLBACK_MODEL
-        value: nvidia/nemotron-3.5-lightning-30b-a3b
+        value: allam-2-7b
       - key: LLM_FALLBACK_TIMEOUT_SECONDS
+        value: "120"
+      - key: LLM_FALLBACK_PROVIDER_2
+        value: nvidia
+      - key: LLM_FALLBACK_MODEL_2
+        value: nvidia/nemotron-3.5-lightning-30b-a3b
+      - key: LLM_FALLBACK_TIMEOUT_SECONDS_2
         value: "120"
       - key: NVIDIA_NIM_API_KEY
         sync: false
-      - key: LLM_FALLBACK_MODEL_2
-        value: gemini-flash-latest
-      # DO NOT add LLM_FALLBACK_PROVIDER_2 here (see header note).
       # ---- pipeline ------------------------------------------------------
       - key: EXTRACTION_CONTEXT_BUDGET_CHARS
-        value: "8000"
+        value: "20000"
       - key: PIPELINE_RUN_DEADLINE_SECONDS
         value: "180"
       - key: PRODUCT_CACHE_FRESHNESS_DAYS

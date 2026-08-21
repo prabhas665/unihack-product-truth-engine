@@ -269,7 +269,7 @@ def _parse_grounding_chunks(response: dict) -> list[dict]:
             title = web.get("title")
             if uri and title:
                 chunks.append({"uri": uri, "title": title})
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, AttributeError):
         pass
     return chunks
 

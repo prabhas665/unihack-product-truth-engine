@@ -247,6 +247,7 @@ class TestHttpErrors:
 class TestGeminiSearchProvider:
     def test_from_settings_requires_api_key(self, monkeypatch):
         monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+        monkeypatch.setattr(settings, "GEMINI_API_KEYS", "")
         with pytest.raises(ProviderConfigurationError, match="GEMINI_API_KEY"):
             GeminiSearchProvider.from_settings(settings)
 
@@ -484,6 +485,7 @@ class TestProviderSelection:
     def test_gemini_selected_without_key_raises_lazily(self, monkeypatch):
         monkeypatch.setattr(settings, "discovery_provider", "gemini")
         monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+        monkeypatch.setattr(settings, "GEMINI_API_KEYS", "")
         with pytest.raises(ProviderConfigurationError, match="GEMINI_API_KEY"):
             providers_from_settings()
 

@@ -63,7 +63,7 @@ def _database_stats(session: Session) -> DatabaseStats:
         .all()
     )
     needs_review = by_status.get("needs_review", 0)
-    recent = [
+    recent = list(dict.fromkeys(
         row.part_number
         for row in (
             session.query(ProductRecordModel)
@@ -72,7 +72,7 @@ def _database_stats(session: Session) -> DatabaseStats:
             .all()
         )
         if row.part_number
-    ]
+    ))
     return DatabaseStats(
         total_records=total,
         by_status=by_status,
@@ -116,9 +116,11 @@ def _compliance_summary() -> ComplianceSummary:
     latest = _latest_report_path()
     if latest is None:
         return ComplianceSummary()
-    report_path = str(latest)
-    with latest.open(encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        with latest.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return ComplianceSummary()
     leak = data.get("placeholder_leak_rows")
     inv_total = data.get("invoice_rule_total") or 0
     inv_pass = data.get("invoice_rule_passed") or 0
@@ -130,7 +132,7 @@ def _compliance_summary() -> ComplianceSummary:
         placeholder_leak_rows=leak,
         invoice_rule_pass_rate=invoice_rate,
         mobile_rule_pass_rate=mobile_rate,
-        last_report_path=report_path,
+        last_report_path=latest.name,
     )
 
 

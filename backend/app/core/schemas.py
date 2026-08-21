@@ -7,6 +7,7 @@ class HealthResponse(BaseModel):
     status: str
     app: str
     version: str
+    database_records: int | None = None
 
 
 class LLMHealthResponse(BaseModel):

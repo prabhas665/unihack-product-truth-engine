@@ -122,6 +122,7 @@ class UniHackDeliveryMapper:
         self._map_descriptions(row, product)
         self._map_classification(row, product)
         self._map_attributes(row, product)
+        self._map_warranty_and_certs(row, product)
         self._map_assets(row, product)
         self._map_ambiguous_blanks(row, product)
         return row
@@ -215,11 +216,15 @@ class UniHackDeliveryMapper:
             )
         if mfr_page is not None:
             self._set(row, "MFR URL", mfr_page.source_url)
+        _MANUAL_TYPES = {
+            SourceType.MANUFACTURER_MANUAL,
+            SourceType.MANUFACTURER_TECHNICAL_PDF,
+        }
         relevant = [
             e
             for e in evidence
             if e.id != (mfr_page.id if mfr_page is not None else None)
-            and _references_mpn(e, requested)
+            and (_references_mpn(e, requested) or e.source_type in _MANUAL_TYPES)
         ]
         for offset, evidence_item in enumerate(
             sorted(relevant, key=lambda e: e.id)[:5]
@@ -296,6 +301,35 @@ class UniHackDeliveryMapper:
                 f"{len(attributes) - ATTRIBUTE_SLOT_COUNT} truncated"
             )
 
+    # -- warranty and certifications from evidence-backed attributes --------
+
+    _CERT_KEYWORDS = (
+        "listed", "certified", "approved", "compliant",
+        "ul ", "csl", "csa", "energystar", "energy star", "nsf",
+        "asse", "cee", "cul",
+    )
+
+    def _map_warranty_and_certs(
+        self, row: DeliveryRow, product: ProductIntelligence
+    ) -> None:
+        """Route warranty and certification attributes to dedicated columns."""
+        attributes = list(product.attributes.values())
+        warranty_parts: list[str] = []
+        cert_parts: list[str] = []
+        for attr in attributes:
+            name_lower = attr.name.lower()
+            val = attr.value or attr.raw_value
+            if not val:
+                continue
+            if "warranty" in name_lower:
+                warranty_parts.append(val)
+            elif any(kw in name_lower for kw in self._CERT_KEYWORDS):
+                cert_parts.append(val)
+        if warranty_parts and not self._get(row, "Warranty"):
+            self._set(row, "Warranty", "; ".join(warranty_parts))
+        if cert_parts and not self._get(row, "Standard/Approvals"):
+            self._set(row, "Standard/Approvals", "|".join(cert_parts))
+
     # -- digital assets ----------------------------------------------------
 
     def _map_assets(
@@ -328,6 +362,7 @@ class UniHackDeliveryMapper:
             "MANUFACTURER_NAME": product.identity.verified_manufacturer,
             "BRAND_NAME": product.identity.verified_brand,
             "TRADE_NAME": product.identity.verified_trade_name,
+            "MANUFACTURER_PART_NUMBER": product.identity.mpn,
         }
         for name, value in fillable.items():
             if value:

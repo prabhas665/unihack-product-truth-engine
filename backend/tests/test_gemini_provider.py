@@ -165,6 +165,7 @@ class TestConfiguration:
 
         monkeypatch.setattr(settings, "llm_provider", "gemini")
         monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+        monkeypatch.setattr(settings, "GEMINI_API_KEYS", "")
         monkeypatch.delitem(_clients, "gemini", raising=False)
         with pytest.raises(LLMConfigurationError):
             get_client()

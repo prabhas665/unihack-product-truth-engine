@@ -11,6 +11,7 @@ export interface HealthResponse {
   status: string;
   app: string;
   version: string;
+  database_records?: number | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -85,11 +86,14 @@ export interface EvaluationReport {
 }
 
 export function runEvaluation(
-  payload: EvaluationRequest = {}
+  payload: EvaluationRequest = {},
+  token?: string,
 ): Promise<EvaluationReport> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
   return request<EvaluationReport>("/api/evaluation/run", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
   });
 }

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -258,7 +258,10 @@ def run_batch(
     service_factory: Callable[[], EnrichmentService] = Depends(get_batch_factory),
     session: Session = Depends(get_session),
 ) -> BatchResult:
-    parsed = request.parsed_rows()
+    try:
+        parsed = request.parsed_rows()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     selected = request.select(parsed)
 
     service = service_factory()
@@ -326,9 +329,9 @@ def run_batch(
                     )
                 )
                 status_counts[status] = status_counts.get(status, 0) + 1
+                writer.append_row(csv_path, _blank_delivery_row(schema))
                 session.commit()
                 committed_rows += 1
-                writer.append_row(csv_path, _blank_delivery_row(schema))
                 continue
             product = result.product
             session.add(
@@ -351,7 +354,6 @@ def run_batch(
                 status_counts.get(report.processing_status, 0) + 1
             )
             session.commit()
-            committed_rows += 1
             writer.append_row(
                 csv_path,
                 DeliveryRow(
@@ -359,6 +361,7 @@ def run_batch(
                     notes=list(result.delivery.notes),
                 ),
             )
+            committed_rows += 1
 
         job.status = _job_status(status_counts)
         session.commit()
