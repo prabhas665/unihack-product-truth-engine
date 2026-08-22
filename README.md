@@ -9,10 +9,14 @@ attaches evidence, detects conflicts, computes confidence and quality scores,
 generates commerce-ready descriptions, and lets the user download the final result.
 
 > **Status: working end-to-end.** Evidence-based enrichment runs for any
-> part number with internet presence: discovery (Serper + Gemini), retrieval
-> (HTML/PDF, SSRF-guarded), extraction (Gemini, evidence-cited attributes),
-> validation, dedup, descriptions, and 252-column delivery CSV. 900+ offline
-> tests. Free-tier speed config: ~8-15 s per product.
+> part number with internet presence: discovery (Groq + Gemini + DuckDuckGo),
+> retrieval (HTML/PDF, SSRF-guarded), extraction (Gemini -> Groq -> NVIDIA
+> failover, evidence-cited attributes), validation, dedup, descriptions, and
+> 252-column delivery CSV. 948 backend + 2 frontend offline tests.
+> Free-tier speed config: ~8-15 s per product.
+
+> **Submission materials:** judge demo script, architecture summary, talking
+> points, and known limitations live in [`submission/`](submission/).
 
 ## Architecture
 
@@ -27,8 +31,9 @@ backend/  (FastAPI, Python 3.11)
      pipeline/    orchestration: identity -> discovery -> retrieval ->
                   extraction -> validation -> merge -> description (stage registry)
      descriptions/ evidence-bound LLM description generation
-     sources/     source discovery (Serper + Gemini providers, policy,
-                  deterministic ranking, two-pass recall) + evidence retrieval
+     sources/     source discovery (Groq + Gemini + DuckDuckGo providers,
+                  Serper adapter, policy, deterministic ranking, two-pass
+                  recall) + evidence retrieval
                   (HTML/PDF fetchers, limits, SSRF guard)
      identity/    verified-brand registry + cross-check (backend/data/verified_brands.json)
      llm/         provider-agnostic LLM client (LLMClient + typed ops + retry + registry)
@@ -49,7 +54,7 @@ backend/  (FastAPI, Python 3.11)
 | `backend/app/llm/` | provider-agnostic `LLMClient` + typed ops + errors + offline `fake` provider | **yes** |
 | `backend/app/extraction/` | evidence-based attribute extraction (prompt builder, service, typed models) | **yes** (offline tests only) |
 | `backend/app/validation/` | normalization + validation framework: Normalizer, LOV/UOM/manufacturer-brand provider abstractions (unavailable until official data loads), ValidationService | **yes** (framework only; no official data) |
-| `backend/app/sources/providers/` | real search discovery provider behind `SourceProvider` (Serper-style JSON API; typed errors; env-only config) + manual integration check | **yes** (Step 6B; offline tests only) |
+| `backend/app/sources/providers/` | real search discovery providers behind `SourceProvider` (Serper-style JSON API, Gemini grounding, Groq web search, DuckDuckGo via `ddgs`; typed errors; env-only config) + manual integration check | **yes** (Step 6B; offline tests only) |
 | `backend/app/llm/providers/deepseek.py` | real DeepSeek provider adapter behind `LLMClient` (official chat/completions API; typed errors; env-only config) | **yes** (Step 6C; offline tests only) |
 | `backend/app/unihack/` | real UniHack dataset integration: input CSV parser, 252-column delivery schema (loaded from the official reference file), delivery mapper, delivery CSV writer | **yes** (Step 6A; no AI/discovery/batch yet) |
 | `backend/app/db/` | SQLite engine + minimal ORM tables | schema only |

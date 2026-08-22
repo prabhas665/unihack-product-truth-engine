@@ -663,10 +663,20 @@ function ComplianceSection({
     try {
       const report = await runEvaluation({ live: false }, token || undefined);
       setLastReport(report.report_path);
-      onRerun();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      // Always refresh dashboard, even on error/timeout: Render may have
+      // written the report despite proxy timeout, so a fresh GET can surface it.
+      try {
+        onRerun();
+      } catch {}
+      // One-shot delayed retry if compliance is still null/stale (e.g., filesystem lag).
+      window.setTimeout(() => {
+        try {
+          onRerun();
+        } catch {}
+      }, 1500);
       setRunning(false);
     }
   }
