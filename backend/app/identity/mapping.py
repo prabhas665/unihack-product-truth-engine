@@ -139,6 +139,37 @@ class VerifiedBrandLookup:
                 out.append(d)
         return out
 
+    def all_trusted_domains(self) -> set[str]:
+        """All domains known as trusted manufacturer sources (registry-wide)."""
+        out: set[str] = set()
+        for table in (self.by_mpn, self.by_brand, self.by_manufacturer):
+            for entry in table.values():
+                for d in entry.get("domains", []) or []:
+                    norm = _normalize_domain(d)
+                    if norm:
+                        out.add(norm)
+        return out
+
+    def is_trusted_domain(self, domain: str) -> bool:
+        """True when domain is a trusted manufacturer domain per registry.
+
+        A bootstrap result may become authoritative manufacturer identity ONLY
+        when this returns True. Retailer / distributor / marketplace /
+        globally allowlisted distributor domains MUST NOT pass — they are for
+        retrieval coverage (SourcePolicy allowlisted) not identity.
+        """
+        norm = _normalize_domain(domain)
+        if not norm:
+            return False
+        # Check registry-wide trusted domains (exact or subdomain match)
+        for trusted in self.all_trusted_domains():
+            if norm == trusted or norm.endswith("." + trusted):
+                return True
+        # Globally allowlisted distributor domains (SOURCE_ALLOWED_DOMAINS)
+        # are intentionally NOT trusted for identity — they are for retrieval
+        # coverage only (OFFICIAL_DISTRIBUTOR), not authoritative manufacturer.
+        return False
+
 
 def is_placeholder(value: str | None) -> bool:
     """True for any official placeholder token, blank, or known data variant."""

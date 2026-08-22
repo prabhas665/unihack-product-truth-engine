@@ -127,7 +127,9 @@ def select_extraction_evidence(
         # product? A real manufacturer sibling page names its own MPN token
         # in its URL slug, title, or body, while a generic page carries no
         # foreign product token there.
-        sibling_tokens = record_tokens - requested_tokens
+        sibling_tokens = {
+            t for t in (record_tokens - requested_tokens) if not t.isdigit()
+        }
         if sibling_tokens:
             return (2, "sibling:" + ",".join(sorted(sibling_tokens)))
         return (1, "secondary")

@@ -199,9 +199,11 @@ class TestEnrichmentScopedDomains:
 
     def test_unseeded_product_rejects_unrelated_curatated_domain(self):
         # Product B verifies to Whirlpool (WDTS7024RZ) -> registry domain is
-        # whirlpool.com only. A makitatools.com candidate must be rejected
+        # whirlpool.com only. A malcotools.com candidate must be rejected
         # because it is NOT in this product's scoped manufacturer_domains.
-        url = "https://makitatools.com/tool/x"
+        # Use malcotools.com (not in global SOURCE_ALLOWED_DOMAINS) to avoid
+        # global distributor allowlist masking the per-product check.
+        url = "https://malcotools.com/tool/x"
         provider = FakeProvider(candidates=[candidate(url)])
         llm = FakeLLMClient(output=canned_output())
         service = make_service(provider, url, [], manufacturer_domains=[], llm=llm)

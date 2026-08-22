@@ -45,11 +45,14 @@ from tests.test_extraction_failover import (  # noqa: E402,F401 - shared offline
 
 REJECT_REASON = "claim not found in cited evidence"
 
-FIXTURE_DIR = "tests/fixtures"
+FIXTURE_DIR = str((__import__("pathlib").Path(__file__).parent / "fixtures").resolve())
 
 
 def load_fixture(name: str) -> dict:
-    with open(f"{FIXTURE_DIR}/{name}", encoding="utf-8") as fh:
+    from pathlib import Path
+
+    p = (Path(__file__).parent / "fixtures" / name).resolve()
+    with p.open(encoding="utf-8") as fh:
         return json.load(fh)
 
 

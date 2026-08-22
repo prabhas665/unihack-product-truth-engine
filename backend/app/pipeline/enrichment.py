@@ -465,6 +465,42 @@ def require_enrichment_identity(
         raise IdentityInvariantError("; ".join(errors))
 
 
+def _brand_matches_domain(input_row: EnrichmentInputRow, domain: str) -> bool:
+    """True when any brand token from input rows matches the domain."""
+    import re
+    domain_base = domain.split(".")[0] if "." in domain else domain
+    if not domain_base or len(domain_base) < 3:
+        return False
+    brand_tokens: set[str] = set()
+    for field in (input_row.e1_brand_value, input_row.unilog_brand_value,
+                  input_row.dib_brand_value, input_row.part_manuf_value):
+        for token in re.findall(r"[a-zA-Z0-9]+", (field or "").lower()):
+            if token and len(token) >= 3:
+                brand_tokens.add(token)
+    domain_tokens = {t for t in re.findall(r"[a-zA-Z0-9]+", domain_base.lower()) if len(t) >= 3}
+    return bool(brand_tokens & domain_tokens)
+
+
+def _domain_matches_identity(identity: ProductIdentity, domain: str) -> bool:
+    """True when any identity field (brand/manufacturer) appears in the domain."""
+    domain_lower = domain.lower()
+    for field in (identity.brand, identity.manufacturer):
+        token = (field or "").strip().lower()
+        if token and len(token) >= 3 and token in domain_lower:
+            return True
+    return False
+
+
+def _domain_matches_description(domain: str, part_desc: str) -> bool:
+    """True when a meaningful token from Part_Desc appears in the domain."""
+    domain_lower = domain.lower()
+    import re
+    for token in re.findall(r"[a-zA-Z]{3,}", (part_desc or "").lower()):
+        if token in domain_lower:
+            return True
+    return False
+
+
 class EnrichmentService:
     """Runs the whole enrichment pipeline for a single product.
 
@@ -580,6 +616,54 @@ class EnrichmentService:
         )
         merged_domains = _merge_domains(registry_domains, self._manufacturer_domains)
 
+        # -- identity bootstrap (Mode A: no curated identity) ----------------
+        bootstrap_result = None
+        bootstrap_evidence: list[EvidenceRecord] = []
+        if not verified.provenance:
+            from app.sources.bootstrap import bootstrap_identity
+
+            bootstrap_result = bootstrap_identity(
+                product=raw_identity,
+                providers=self._providers or [],
+                retriever=self._retriever or self._default_retriever(),
+                part_manuf_input=input_row.part_manuf_value or "",
+            )
+            if bootstrap_result.success:
+                # Trust-boundary gate: bootstrap may be discovery signal only;
+                # authoritative identity requires independently trusted domain.
+                if not self._verified_lookup.is_trusted_domain(
+                    bootstrap_result.domain
+                ):
+                    review_reasons.append(
+                        f"identity bootstrap candidate domain '{bootstrap_result.domain}' "
+                        f"for MPN {raw_identity.mpn} not trusted manufacturer source; "
+                        f"not establishing authoritative identity "
+                        f"(source={bootstrap_result.provenance.source_url}); "
+                        f"candidate preserved for traceability"
+                    )
+                else:
+                    discovery_product = discovery_product.model_copy(
+                        update={
+                            "verified_manufacturer": bootstrap_result.manufacturer,
+                            "verified_brand": bootstrap_result.brand,
+                            "identity_provenance": "bootstrap",
+                        }
+                    )
+                    merged_domains = [bootstrap_result.domain] + merged_domains
+                    bootstrap_evidence = list(bootstrap_result.bootstrap_evidence)
+                    review_reasons.append(
+                        f"identity bootstrap ({bootstrap_result.provenance.trust_status}): "
+                        f"manufacturer={bootstrap_result.manufacturer}, "
+                        f"brand={bootstrap_result.brand}, "
+                        f"domain={bootstrap_result.domain}, "
+                        f"source={bootstrap_result.provenance.source_url}, "
+                        f"evidence={bootstrap_result.evidence_summary}"
+                    )
+            else:
+                review_reasons.append(
+                    f"identity bootstrap failed: {bootstrap_result.failure_reason}"
+                )
+
         # -- discovery ------------------------------------------------------
         mark(StageName.DISCOVERY, StageStatus.RUNNING)
         discovery = run_discovery(
@@ -600,21 +684,90 @@ class EnrichmentService:
                 f"rejected candidate {rejected.url}: {rejected.rejection_reason}"
             )
 
-        # -- verified identity (post-discovery, idempotent) ---------------
-        discovery.product.verified_manufacturer = verified.manufacturer
-        discovery.product.verified_brand = verified.brand
-        discovery.product.verified_trade_name = verified.trade_name
-        discovery.product.identity_provenance = verified.provenance
-        if verified.provenance:
-            review_reasons.append(
-                f"verified identity ({verified.provenance}): "
-                f"manufacturer={verified.manufacturer or '-'}, "
-                f"brand={verified.brand or '-'}"
+        # -- identity bootstrap (Mode B: verified but 0 candidates) --------
+        if not discovery.candidates and verified.provenance == "manufacturer":
+            from app.sources.bootstrap import bootstrap_identity
+            from app.identity.mapping import _same_company as _check_company
+
+            bootstrap_result_b = bootstrap_identity(
+                product=raw_identity,
+                providers=self._providers or [],
+                retriever=self._retriever or self._default_retriever(),
+                part_manuf_input=input_row.part_manuf_value or "",
             )
+            if bootstrap_result_b.success:
+                # Trust gate for Mode B as well: domain must be trusted.
+                if not self._verified_lookup.is_trusted_domain(
+                    bootstrap_result_b.domain
+                ):
+                    review_reasons.append(
+                        f"identity bootstrap Mode B candidate domain "
+                        f"'{bootstrap_result_b.domain}' for MPN {raw_identity.mpn} "
+                        f"not trusted manufacturer source; not adding domain "
+                        f"(source={bootstrap_result_b.provenance.source_url})"
+                    )
+                elif _check_company(
+                    bootstrap_result_b.manufacturer, verified.manufacturer
+                ) or _brand_matches_domain(
+                    input_row, bootstrap_result_b.domain
+                ) or _domain_matches_identity(
+                    raw_identity, bootstrap_result_b.domain
+                ) or _domain_matches_description(
+                    bootstrap_result_b.domain, input_row.part_desc_value or ""
+                ):
+                    if bootstrap_result_b.domain not in merged_domains:
+                        merged_domains.append(bootstrap_result_b.domain)
+                    bootstrap_evidence = list(
+                        bootstrap_result_b.bootstrap_evidence
+                    )
+                    review_reasons.append(
+                        f"identity bootstrap Mode B "
+                        f"({bootstrap_result_b.provenance.trust_status}): "
+                        f"domain={bootstrap_result_b.domain}, "
+                        f"manufacturer consistent with "
+                        f"verified={verified.manufacturer}, "
+                        f"source={bootstrap_result_b.provenance.source_url}"
+                    )
+                else:
+                    review_reasons.append(
+                        f"identity bootstrap Mode B CONFLICT: "
+                        f"bootstrap manufacturer="
+                        f"{bootstrap_result_b.manufacturer} "
+                        f"differs from verified={verified.manufacturer}; "
+                        f"domain={bootstrap_result_b.domain} NOT added"
+                    )
+            else:
+                review_reasons.append(
+                    f"identity bootstrap Mode B failed: "
+                    f"{bootstrap_result_b.failure_reason}"
+                )
+
+        # -- verified identity (post-discovery, idempotent) ---------------
+        # Preserve bootstrap-established trusted identity; do not overwrite
+        # a bootstrap provenance (trusted manufacturer) with blank verified.
+        if discovery.product.identity_provenance != "bootstrap":
+            discovery.product.verified_manufacturer = verified.manufacturer
+            discovery.product.verified_brand = verified.brand
+            discovery.product.verified_trade_name = verified.trade_name
+            discovery.product.identity_provenance = verified.provenance
+            if verified.provenance:
+                review_reasons.append(
+                    f"verified identity ({verified.provenance}): "
+                    f"manufacturer={verified.manufacturer or '-'}, "
+                    f"brand={verified.brand or '-'}"
+                )
+            else:
+                review_reasons.append(
+                    "verified identity: none found; MANUFACTURER_NAME/BRAND_NAME "
+                    "left blank (no trusted source)"
+                )
         else:
+            # Bootstrap already established trusted identity; keep it and log.
             review_reasons.append(
-                "verified identity: none found; MANUFACTURER_NAME/BRAND_NAME "
-                "left blank (no trusted source)"
+                f"verified identity preserved from bootstrap: "
+                f"manufacturer={discovery.product.verified_manufacturer or '-'}, "
+                f"brand={discovery.product.verified_brand or '-'}, "
+                f"domain={discovery.product.verified_manufacturer and discovery.product.verified_brand and 'bootstrap' or 'bootstrap'}"
             )
 
         mark(
@@ -630,7 +783,7 @@ class EnrichmentService:
         extraction: ExtractionResponse | None = None
         validation: ValidationSummary | None = None
 
-        if not discovery.candidates:
+        if not discovery.candidates and not bootstrap_evidence:
             note = "no allowed source candidates: nothing to retrieve"
             mark(StageName.RETRIEVAL, StageStatus.RUNNING)
             mark(StageName.RETRIEVAL, StageStatus.SKIPPED, note)
@@ -650,22 +803,30 @@ class EnrichmentService:
                 "no extracted attributes",
             )
         else:
-            mark(StageName.RETRIEVAL, StageStatus.RUNNING)
-            evidence, retriever_failures = self._retrieve(discovery.candidates)
-            for failure in retriever_failures:
-                review_reasons.append(f"retrieval failed for {failure}")
-            mark(
-                StageName.RETRIEVAL,
-                StageStatus.COMPLETED,
-                f"retrieved {len(discovery.candidates)} candidate(s)",
-            )
+            if not discovery.candidates:
+                mark(StageName.RETRIEVAL, StageStatus.RUNNING)
+                mark(StageName.RETRIEVAL, StageStatus.SKIPPED, "bootstrap evidence only")
+                if bootstrap_evidence:
+                    evidence.extend(bootstrap_evidence)
+            else:
+                mark(StageName.RETRIEVAL, StageStatus.RUNNING)
+                evidence, retriever_failures = self._retrieve(discovery.candidates)
+                for failure in retriever_failures:
+                    review_reasons.append(f"retrieval failed for {failure}")
+                mark(
+                    StageName.RETRIEVAL,
+                    StageStatus.COMPLETED,
+                    f"retrieved {len(discovery.candidates)} candidate(s)",
+                )
+                usable = [
+                    record
+                    for record in evidence
+                    if record.retrieval_status == RetrievalStatus.SUCCESS
+                    and record.text.strip()
+                ]
+                if bootstrap_evidence:
+                    evidence.extend(bootstrap_evidence)
 
-            usable = [
-                record
-                for record in evidence
-                if record.retrieval_status == RetrievalStatus.SUCCESS
-                and record.text.strip()
-            ]
             # STEP 20: narrow the extraction evidence to the requested MPN and
             # enforce a hard context budget. Sibling manufacturer pages that
             # describe a DIFFERENT product (and never mention the requested
@@ -677,7 +838,7 @@ class EnrichmentService:
             # and the evidence map; only the LLM input is filtered.
             selection = select_extraction_evidence(
                 discovery.product,
-                usable,
+                bootstrap_evidence + usable,
                 budget_chars=settings.extraction_context_budget_chars,
             )
             extraction_evidence = selection.selected

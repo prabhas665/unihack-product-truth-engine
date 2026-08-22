@@ -84,9 +84,13 @@ class TestEvaluationLockdown:
         assert response.status_code == 422
 
     def test_relative_path_inside_repo_allowed(self):
+        from pathlib import Path
+
+        # Use absolute fixture path so test passes from either repo root or backend cwd.
+        abs_path = (Path(__file__).parent / "fixtures" / "Unihack_ Sample Dataset - Input.csv").resolve()
         response = client.post(
             "/api/evaluation/run",
-            json={"limit": 1, "input_path": "tests/fixtures/Unihack_ Sample Dataset - Input.csv"},
+            json={"limit": 1, "input_path": str(abs_path)},
             headers=_auth(),
         )
         assert response.status_code == 200

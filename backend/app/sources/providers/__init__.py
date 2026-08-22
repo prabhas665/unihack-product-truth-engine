@@ -14,6 +14,7 @@ run_discovery() by default:
 - DISCOVERY_PROVIDER=groq         -> the Groq Web Search discovery provider
   (discovery ONLY; the LLM layer stays on OpenRouter). Configured entirely
   from backend environment variables (GROQ_*).
+- DISCOVERY_PROVIDER=duckduckgo  -> free DuckDuckGo web search (no API key).
 - DISCOVERY_PROVIDER=search,gemini -> comma-separated list: Serper primary,
   Gemini automatic backup if Serper returns nothing allowed.
 - unknown name                    -> ProviderConfigurationError at discovery
@@ -27,6 +28,7 @@ from app.sources.discovery import PROVIDERS, SourceProvider
 from app.sources.errors import ProviderConfigurationError
 from app.sources.providers.gemini_search import GeminiSearchProvider
 from app.sources.providers.groq_search import GroqSearchProvider
+from app.sources.providers.duckduckgo_search import DuckDuckGoSearchProvider
 from app.sources.providers.search import (
     DEFAULT_BASE_URL,
     SearchApiClient,
@@ -52,6 +54,7 @@ _SUPPORTED_NAMES: dict[str, type[SourceProvider]] = {
     SearchProvider.name: SearchProvider,  # "search" -> Serper
     "gemini": GeminiSearchProvider,
     "groq": GroqSearchProvider,
+    "duckduckgo": DuckDuckGoSearchProvider,
 }
 
 

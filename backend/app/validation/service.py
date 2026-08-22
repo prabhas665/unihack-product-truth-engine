@@ -207,9 +207,21 @@ class ValidationService:
         text = self._normalizer.normalize_text(candidate.raw_value)
         if text != candidate.raw_value:
             applied.append("text.cleanup")
-        converted = self._normalizer.normalize_fraction_decimal(text)
-        if converted != text:
-            applied.append("fraction_decimal.convert")
+        # Fraction normalization: only for measurement fields with explicit
+        # numeric units; categorical/text (e.g., Hub Type) must remain textual.
+        # Conservative: Hub Type and similar categorical attributes never convert.
+        name_lower = candidate.name.lower().strip()
+        is_categorical = ("hub" in name_lower and "type" in name_lower) or name_lower in {
+            "hub type",
+            "hub_type",
+            "hubtype",
+        }
+        if is_categorical:
+            converted = text
+        else:
+            converted = self._normalizer.normalize_fraction_decimal(text)
+            if converted != text:
+                applied.append("fraction_decimal.convert")
         if applied:
             messages.append(
                 _message(
@@ -221,6 +233,9 @@ class ValidationService:
                 )
             )
             return converted, applied
+        if is_categorical and text:
+            # For categorical with no fraction conversion, preserve cleaned text
+            return text, applied
         if candidate.normalized_value.strip():
             messages.append(
                 _message(

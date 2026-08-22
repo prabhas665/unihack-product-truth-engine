@@ -95,9 +95,10 @@ def chain_service(
 
 
 def xlc10zw_record() -> EvidenceRecord:
-    fixture = json.load(
-        open("tests/fixtures/xlc10zw_category_page.json", encoding="utf-8")
-    )
+    from pathlib import Path
+
+    p = (Path(__file__).parent / "fixtures" / "xlc10zw_category_page.json").resolve()
+    fixture = json.load(p.open(encoding="utf-8"))
     return EvidenceRecord(
         evidence_id=fixture["evidence_id"],
         source_candidate_id="cand-" + fixture["evidence_id"],
@@ -117,9 +118,10 @@ def xlc10zw_request() -> ExtractionRequest:
 
 
 def probe_items_json() -> str:
-    probe = json.load(
-        open("tests/fixtures/xlc10zw_probe_attributes.json", encoding="utf-8")
-    )
+    from pathlib import Path
+
+    p = (Path(__file__).parent / "fixtures" / "xlc10zw_probe_attributes.json").resolve()
+    probe = json.load(p.open(encoding="utf-8"))
     items = [
         {
             "name": a["name"],

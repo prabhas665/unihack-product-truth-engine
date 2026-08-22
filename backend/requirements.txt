@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic-settings
 sqlalchemy
 httpx
+ddgs
 pypdf
 certifi
 pytest

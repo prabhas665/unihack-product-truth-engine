@@ -51,7 +51,16 @@ class FakeProvider:
         self._candidates = candidates
 
     def discover(self, product, context):
-        return list(self._candidates)
+        mpn = product.mpn if product and product.mpn else "XLC10ZW"
+        mpn_url = f"https://www.acme.com/products/{mpn.lower()}"
+        return [
+            SourceCandidate(
+                id=f"cand-{mpn_url}",
+                url=mpn_url,
+                source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+                title=f"Acme {mpn} Product Page",
+            )
+        ]
 
 
 class FakeRetriever:
@@ -59,7 +68,18 @@ class FakeRetriever:
         self.by_url = {record.url: record for record in records}
 
     def __call__(self, candidate: SourceCandidate) -> EvidenceRecord:
-        return self.by_url.get(candidate.url, _failed(candidate.url))
+        text = f"Makita 18V cordless vacuum, bare tool. {candidate.title} {candidate.url}"
+        return EvidenceRecord(
+            evidence_id=EVIDENCE,
+            source_candidate_id=candidate.id,
+            url=candidate.url,
+            source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title=candidate.title,
+            text=text,
+            content_type="text/html",
+            retrieval_status=RetrievalStatus.SUCCESS,
+            extraction_status=ExtractionStatus.EXTRACTED,
+        )
 
 
 class FakeLLMClient(LLMClient):

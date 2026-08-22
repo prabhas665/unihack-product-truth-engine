@@ -887,3 +887,271 @@ class TestEnrichApi:
             app.dependency_overrides.clear()
 
         assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# bootstrap integration tests
+# --------------------------------------------------------------------------
+
+from unittest.mock import patch
+from app.sources.bootstrap import BootstrapResult, BootstrapProvenance
+
+
+def _bootstrap_provider() -> FakeProvider:
+    """Provider returning candidates on mirka.com for Mode A test."""
+    return FakeProvider([
+        SourceCandidate(
+            id="cand-mirka-bootstrap",
+            url="https://www.mirka.com/products/5b-332-080",
+            source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+            title="Mirka 5B-332-080 Abrasive Disc",
+        ),
+    ])
+
+
+def _bootstrap_records() -> list[EvidenceRecord]:
+    return [
+        success_record(
+            "https://www.mirka.com/products/5b-332-080",
+            evidence_id="ev-bootstrap-0001",
+            text="Mirka Abrasives Inc makes the 5B-332-080 abrasive disc. "
+                 "5B-332-080 belt width is 0.5 inch, belt length is 18 inch.",
+        ),
+    ]
+
+
+def _bootstrap_success_result() -> BootstrapResult:
+    return BootstrapResult(
+        success=True,
+        manufacturer="Mirka Abrasives Inc",
+        brand="Mirka",
+        domain="mirka.com",
+        evidence_summary="1/1 candidates verified; domain=mirka.com",
+        provenance=BootstrapProvenance(
+            source_url="https://www.mirka.com/products/5b-332-080",
+            evidence_id="ev-bootstrap-0001",
+            verification_reason="1 page(s) verified; MPN present, manufacturer consistent, no contamination",
+        ),
+        bootstrap_evidence=[
+            EvidenceRecord(
+                evidence_id="ev-bootstrap-0001",
+                url="https://www.mirka.com/products/5b-332-080",
+                source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+                title="Mirka 5B-332-080 Abrasive Disc",
+                text="Mirka Abrasives Inc makes the 5B-332-080 abrasive disc. "
+                     "5B-332-080 belt width is 0.5 inch, belt length is 18 inch.",
+                content_type="text/html",
+                retrieval_status=RetrievalStatus.SUCCESS,
+            ),
+        ],
+    )
+
+
+def _bootstrap_mode_b_result() -> BootstrapResult:
+    return BootstrapResult(
+        success=True,
+        manufacturer="Freud",
+        brand="Diablo",
+        domain="diablotools.com",
+        evidence_summary="1/1 candidates verified; domain=diablotools.com",
+        provenance=BootstrapProvenance(
+            source_url="https://diablotools.com/products/dcb518asts06g",
+            evidence_id="ev-bootstrap-modeb",
+            verification_reason="1 page(s) verified; MPN present, manufacturer consistent, no contamination",
+        ),
+        bootstrap_evidence=[
+            EvidenceRecord(
+                evidence_id="ev-bootstrap-modeb",
+                url="https://diablotools.com/products/dcb518asts06g",
+                source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+                title="Diablo DCB518ASTS06G Sanding Belt",
+                text="Diablo DCB518ASTS06G sanding belt. Freud Inc makes Diablo tools.",
+                content_type="text/html",
+                retrieval_status=RetrievalStatus.SUCCESS,
+            ),
+        ],
+    )
+
+
+def _bootstrap_conflict_result() -> BootstrapResult:
+    return BootstrapResult(
+        success=True,
+        manufacturer="Bosch Power Tools Inc",
+        brand="Bosch",
+        domain="boschtools.com",
+        evidence_summary="1/1 candidates verified; domain=boschtools.com",
+        provenance=BootstrapProvenance(
+            source_url="https://boschtools.com/products/5b-332-080",
+            evidence_id="ev-bootstrap-conflict",
+            verification_reason="1 page(s) verified",
+        ),
+        bootstrap_evidence=[
+            EvidenceRecord(
+                evidence_id="ev-bootstrap-conflict",
+                url="https://boschtools.com/products/5b-332-080",
+                source_type=SourceType.MANUFACTURER_PRODUCT_PAGE,
+                title="Bosch 5B-332-080",
+                text="Bosch Power Tools Inc 5B-332-080 abrasive disc.",
+                content_type="text/html",
+                retrieval_status=RetrievalStatus.SUCCESS,
+            ),
+        ],
+    )
+
+
+def _bootstrap_fail_result() -> BootstrapResult:
+    return BootstrapResult(
+        success=False,
+        failure_reason="no search results found",
+    )
+
+
+def _mirka_request() -> EnrichmentRequest:
+    return EnrichmentRequest(
+        Mfg_Part_Num="5B-332-080",
+        Part_Desc="5B-332-080 Mirka abrasive disc",
+        E1_Brand="-- Unbranded --",
+        Unilog_Brand="-- No Unilog Brand --",
+        DIB_Brand="-- No DIB Brand --",
+        Part_Manuf="Mirka Abrasives Inc",
+    )
+
+
+def _diablo_request() -> EnrichmentRequest:
+    return EnrichmentRequest(
+        Mfg_Part_Num="DCB518ASTS06G",
+        Part_Desc='DCB518ASTS06G Diablo 1/2"x18" - Sanding Belt 6pc',
+        E1_Brand="-- Unbranded --",
+        Unilog_Brand="-- No Unilog Brand --",
+        DIB_Brand="-- No DIB Brand --",
+        Part_Manuf="Freud Inc (2435)",
+    )
+
+
+class TestBootstrapIntegration:
+    def test_bootstrap_mode_a_e2e(self):
+        """Mode A: unverified MPN -> bootstrap -> enrichment completes."""
+        provider = _bootstrap_provider()
+        records = _bootstrap_records()
+        service = EnrichmentService(
+            providers=[provider],
+            manufacturer_domains=[],
+            retriever=FakeRetriever(records),
+            llm_client=FakeLLMClient(output=canned_output("ev-bootstrap-0001")),
+        )
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            return_value=_bootstrap_success_result(),
+        ), patch.object(
+            service._verified_lookup, "is_trusted_domain", return_value=True
+        ):
+            result = service.run(_mirka_request())
+
+        assert result.processing.status in (
+            ProcessingStatus.COMPLETED, ProcessingStatus.NEEDS_REVIEW,
+        )
+        assert any("identity bootstrap" in r for r in result.review_reasons)
+        assert result.delivery.column_count == 252
+        assert result.extraction is not None
+        assert len(result.extraction.attributes) > 0
+
+    def test_bootstrap_mode_b_e2e(self):
+        """Mode B: verified manufacturer but 0 candidates -> bootstrap -> re-discovery."""
+        # Initial provider returns no allowed candidates (rejected domain) so Mode B triggers.
+        empty_provider = FakeProvider([])
+        records = [
+            success_record(
+                "https://diablotools.com/products/dcb518asts06g",
+                evidence_id="ev-modeb-0001",
+                text="Diablo DCB518ASTS06G sanding belt. Freud Inc makes Diablo tools.",
+            ),
+        ]
+        service = EnrichmentService(
+            providers=[empty_provider],
+            manufacturer_domains=[],
+            retriever=FakeRetriever(records),
+            llm_client=FakeLLMClient(output=canned_output("ev-modeb-0001")),
+        )
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            return_value=_bootstrap_mode_b_result(),
+        ):
+            result = service.run(_diablo_request())
+
+        assert result.processing.status in (
+            ProcessingStatus.COMPLETED, ProcessingStatus.NEEDS_REVIEW,
+        )
+        assert any("Mode B" in r for r in result.review_reasons)
+        assert result.delivery.column_count == 252
+
+    def test_bootstrap_failure_yields_needs_review(self):
+        """Bootstrap fails -> NEEDS_REVIEW."""
+        service = EnrichmentService(
+            providers=[],
+            manufacturer_domains=[],
+            retriever=FakeRetriever([]),
+            llm_client=FakeLLMClient(output=canned_output()),
+        )
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            return_value=_bootstrap_fail_result(),
+        ):
+            result = service.run(_mirka_request())
+
+        assert any("bootstrap failed" in r for r in result.review_reasons)
+
+    def test_bootstrap_mode_b_conflict_recorded(self):
+        """Mode B: bootstrap finds different manufacturer -> conflict recorded."""
+        service = EnrichmentService(
+            providers=[],
+            manufacturer_domains=[],
+            retriever=FakeRetriever([]),
+            llm_client=FakeLLMClient(output=canned_output()),
+        )
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            return_value=_bootstrap_conflict_result(),
+        ), patch.object(
+            service._verified_lookup, "is_trusted_domain", return_value=True
+        ):
+            result = service.run(_diablo_request())
+
+        assert any("CONFLICT" in r for r in result.review_reasons)
+        assert any("boschtools.com NOT added" in r for r in result.review_reasons)
+
+    def test_existing_verified_unchanged(self):
+        """Known MPN (in by_mpn) -> bootstrap never called."""
+        service = success_service()
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            side_effect=AssertionError("bootstrap should not be called"),
+        ):
+            result = service.run(default_request())
+
+        assert result.processing.status == ProcessingStatus.COMPLETED
+        assert not any("identity bootstrap" in r for r in result.review_reasons)
+        assert result.delivery.column_count == 252
+
+    def test_bootstrap_evidence_reused_in_extraction(self):
+        """Bootstrap evidence is passed to extraction."""
+        provider = _bootstrap_provider()
+        records = _bootstrap_records()
+        service = EnrichmentService(
+            providers=[provider],
+            manufacturer_domains=[],
+            retriever=FakeRetriever(records),
+            llm_client=FakeLLMClient(output=canned_output("ev-bootstrap-0001")),
+        )
+        with patch(
+            "app.sources.bootstrap.bootstrap_identity",
+            return_value=_bootstrap_success_result(),
+        ), patch.object(
+            service._verified_lookup, "is_trusted_domain", return_value=True
+        ):
+            result = service.run(_mirka_request())
+
+        assert result.processing.status in (
+            ProcessingStatus.COMPLETED, ProcessingStatus.NEEDS_REVIEW,
+        )
+        assert result.extraction is not None
+        assert len(result.extraction.attributes) > 0
